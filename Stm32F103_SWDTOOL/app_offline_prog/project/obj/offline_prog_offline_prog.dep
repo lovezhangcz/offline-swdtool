@@ -1,103 +1,0 @@
-Dependencies for Project 'offline_prog', Target 'offline_prog': (DO NOT MODIFY !)
-F (..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x\startup\arm\startup_stm32f10x_md.s)(0x6AFEEA39)(--cpu Cortex-M3 -g --apcs=interwork --pd "__MICROLIB SETA 1"-I C:\Keil_v5\ARM\RV31\INC-I C:\Keil_v5\ARM\CMSIS\Include-I C:\Keil_v5\ARM\Inc\ST\STM32F10x--pd "__UVISION_VERSION SETA 518"--list .\list\startup_stm32f10x_md.lst --xref -o .\obj\startup_stm32f10x_md.o --depend .\obj\startup_stm32f10x_md.d)
-F (..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x\system_stm32f10x.c)(0x6AFEEA39)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O0 --apcs=interwork --split_sections -I ..\source -I ..\..\fw_lib\CMSIS\CM3\CoreSupport -I ..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x-I C:\Keil_v5\ARM\RV31\INC-I C:\Keil_v5\ARM\CMSIS\Include-I C:\Keil_v5\ARM\Inc\ST\STM32F10x-D__UVISION_VERSION="518" -DSTM32F10X_MD-o .\obj\system_stm32f10x.o --omf_browse .\obj\system_stm32f10x.crf --depend .\obj\system_stm32f10x.d)
-I (..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x\stm32f10x.h)(0x6AFEEA39)
-I (..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cm3.h)(0x6AFEEA39)
-I (C:\Keil_v5\ARM\ARMCC\include\stdint.h)(0x569DEA3A)
-I (..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cmInstr.h)(0x6AFEEA39)
-I (..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cmFunc.h)(0x6AFEEA39)
-I (..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x\system_stm32f10x.h)(0x6AFEEA39)
-F (..\source\main.c)(0x6AFF0C7A)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O0 --apcs=interwork --split_sections -I ..\source -I ..\..\fw_lib\CMSIS\CM3\CoreSupport -I ..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x-I C:\Keil_v5\ARM\RV31\INC-I C:\Keil_v5\ARM\CMSIS\Include-I C:\Keil_v5\ARM\Inc\ST\STM32F10x-D__UVISION_VERSION="518" -DSTM32F10X_MD-o .\obj\main.o --omf_browse .\obj\main.crf --depend .\obj\main.d)
-I (..\source\board.h)(0x6AFF0C73)
-I (..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x\stm32f10x.h)(0x6AFEEA39)
-I (..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cm3.h)(0x6AFEEA39)
-I (C:\Keil_v5\ARM\ARMCC\include\stdint.h)(0x569DEA3A)
-I (..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cmInstr.h)(0x6AFEEA39)
-I (..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cmFunc.h)(0x6AFEEA39)
-I (..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x\system_stm32f10x.h)(0x6AFEEA39)
-I (..\source\bsp.h)(0x6AFEE061)
-I (..\source\usb_cdc.h)(0x6AFEE14D)
-I (..\source\proto.h)(0x6AFEFE97)
-I (..\source\storage.h)(0x6AFEE1EC)
-I (..\source\swd_host.h)(0x6AFF0A25)
-I (..\source\target_prog.h)(0x6AFEFEAC)
-F (..\source\bsp.c)(0x6AFEE667)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O0 --apcs=interwork --split_sections -I ..\source -I ..\..\fw_lib\CMSIS\CM3\CoreSupport -I ..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x-I C:\Keil_v5\ARM\RV31\INC-I C:\Keil_v5\ARM\CMSIS\Include-I C:\Keil_v5\ARM\Inc\ST\STM32F10x-D__UVISION_VERSION="518" -DSTM32F10X_MD-o .\obj\bsp.o --omf_browse .\obj\bsp.crf --depend .\obj\bsp.d)
-I (..\source\board.h)(0x6AFF0C73)
-I (..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x\stm32f10x.h)(0x6AFEEA39)
-I (..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cm3.h)(0x6AFEEA39)
-I (C:\Keil_v5\ARM\ARMCC\include\stdint.h)(0x569DEA3A)
-I (..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cmInstr.h)(0x6AFEEA39)
-I (..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cmFunc.h)(0x6AFEEA39)
-I (..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x\system_stm32f10x.h)(0x6AFEEA39)
-I (..\source\bsp.h)(0x6AFEE061)
-F (..\source\crc.c)(0x6AFEE061)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O0 --apcs=interwork --split_sections -I ..\source -I ..\..\fw_lib\CMSIS\CM3\CoreSupport -I ..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x-I C:\Keil_v5\ARM\RV31\INC-I C:\Keil_v5\ARM\CMSIS\Include-I C:\Keil_v5\ARM\Inc\ST\STM32F10x-D__UVISION_VERSION="518" -DSTM32F10X_MD-o .\obj\crc.o --omf_browse .\obj\crc.crf --depend .\obj\crc.d)
-I (..\source\crc.h)(0x6AFEE061)
-I (C:\Keil_v5\ARM\ARMCC\include\stdint.h)(0x569DEA3A)
-F (..\source\storage.c)(0x6AFEE1EC)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O0 --apcs=interwork --split_sections -I ..\source -I ..\..\fw_lib\CMSIS\CM3\CoreSupport -I ..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x-I C:\Keil_v5\ARM\RV31\INC-I C:\Keil_v5\ARM\CMSIS\Include-I C:\Keil_v5\ARM\Inc\ST\STM32F10x-D__UVISION_VERSION="518" -DSTM32F10X_MD-o .\obj\storage.o --omf_browse .\obj\storage.crf --depend .\obj\storage.d)
-I (..\source\storage.h)(0x6AFEE1EC)
-I (C:\Keil_v5\ARM\ARMCC\include\stdint.h)(0x569DEA3A)
-I (..\source\board.h)(0x6AFF0C73)
-I (..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x\stm32f10x.h)(0x6AFEEA39)
-I (..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cm3.h)(0x6AFEEA39)
-I (..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cmInstr.h)(0x6AFEEA39)
-I (..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cmFunc.h)(0x6AFEEA39)
-I (..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x\system_stm32f10x.h)(0x6AFEEA39)
-F (..\source\proto.c)(0x6AFEFF16)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O0 --apcs=interwork --split_sections -I ..\source -I ..\..\fw_lib\CMSIS\CM3\CoreSupport -I ..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x-I C:\Keil_v5\ARM\RV31\INC-I C:\Keil_v5\ARM\CMSIS\Include-I C:\Keil_v5\ARM\Inc\ST\STM32F10x-D__UVISION_VERSION="518" -DSTM32F10X_MD-o .\obj\proto.o --omf_browse .\obj\proto.crf --depend .\obj\proto.d)
-I (C:\Keil_v5\ARM\ARMCC\include\string.h)(0x569DEA3A)
-I (..\source\proto.h)(0x6AFEFE97)
-I (C:\Keil_v5\ARM\ARMCC\include\stdint.h)(0x569DEA3A)
-I (..\source\usb_cdc.h)(0x6AFEE14D)
-I (..\source\storage.h)(0x6AFEE1EC)
-I (..\source\board.h)(0x6AFF0C73)
-I (..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x\stm32f10x.h)(0x6AFEEA39)
-I (..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cm3.h)(0x6AFEEA39)
-I (..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cmInstr.h)(0x6AFEEA39)
-I (..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cmFunc.h)(0x6AFEEA39)
-I (..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x\system_stm32f10x.h)(0x6AFEEA39)
-I (..\source\target_prog.h)(0x6AFEFEAC)
-I (..\source\crc.h)(0x6AFEE061)
-F (..\source\target_prog.c)(0x6AFF0A40)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O0 --apcs=interwork --split_sections -I ..\source -I ..\..\fw_lib\CMSIS\CM3\CoreSupport -I ..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x-I C:\Keil_v5\ARM\RV31\INC-I C:\Keil_v5\ARM\CMSIS\Include-I C:\Keil_v5\ARM\Inc\ST\STM32F10x-D__UVISION_VERSION="518" -DSTM32F10X_MD-o .\obj\target_prog.o --omf_browse .\obj\target_prog.crf --depend .\obj\target_prog.d)
-I (..\source\target_prog.h)(0x6AFEFEAC)
-I (C:\Keil_v5\ARM\ARMCC\include\stdint.h)(0x569DEA3A)
-I (..\source\swd_host.h)(0x6AFF0A25)
-I (..\source\storage.h)(0x6AFEE1EC)
-I (..\source\board.h)(0x6AFF0C73)
-I (..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x\stm32f10x.h)(0x6AFEEA39)
-I (..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cm3.h)(0x6AFEEA39)
-I (..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cmInstr.h)(0x6AFEEA39)
-I (..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cmFunc.h)(0x6AFEEA39)
-I (..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x\system_stm32f10x.h)(0x6AFEEA39)
-I (..\source\proto.h)(0x6AFEFE97)
-I (..\source\crc.h)(0x6AFEE061)
-I (..\source\bsp.h)(0x6AFEE061)
-F (..\source\swd_host.c)(0x6AFF0A1D)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O0 --apcs=interwork --split_sections -I ..\source -I ..\..\fw_lib\CMSIS\CM3\CoreSupport -I ..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x-I C:\Keil_v5\ARM\RV31\INC-I C:\Keil_v5\ARM\CMSIS\Include-I C:\Keil_v5\ARM\Inc\ST\STM32F10x-D__UVISION_VERSION="518" -DSTM32F10X_MD-o .\obj\swd_host.o --omf_browse .\obj\swd_host.crf --depend .\obj\swd_host.d)
-I (..\source\swd_host.h)(0x6AFF0A25)
-I (C:\Keil_v5\ARM\ARMCC\include\stdint.h)(0x569DEA3A)
-I (..\source\board.h)(0x6AFF0C73)
-I (..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x\stm32f10x.h)(0x6AFEEA39)
-I (..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cm3.h)(0x6AFEEA39)
-I (..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cmInstr.h)(0x6AFEEA39)
-I (..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cmFunc.h)(0x6AFEEA39)
-I (..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x\system_stm32f10x.h)(0x6AFEEA39)
-I (..\source\bsp.h)(0x6AFEE061)
-F (..\source\usb_hw.c)(0x6AFEF29B)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O0 --apcs=interwork --split_sections -I ..\source -I ..\..\fw_lib\CMSIS\CM3\CoreSupport -I ..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x-I C:\Keil_v5\ARM\RV31\INC-I C:\Keil_v5\ARM\CMSIS\Include-I C:\Keil_v5\ARM\Inc\ST\STM32F10x-D__UVISION_VERSION="518" -DSTM32F10X_MD-o .\obj\usb_hw.o --omf_browse .\obj\usb_hw.crf --depend .\obj\usb_hw.d)
-I (..\source\usb_hw.h)(0x6AFEE0CB)
-I (C:\Keil_v5\ARM\ARMCC\include\stdint.h)(0x569DEA3A)
-I (..\source\board.h)(0x6AFF0C73)
-I (..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x\stm32f10x.h)(0x6AFEEA39)
-I (..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cm3.h)(0x6AFEEA39)
-I (..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cmInstr.h)(0x6AFEEA39)
-I (..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cmFunc.h)(0x6AFEEA39)
-I (..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x\system_stm32f10x.h)(0x6AFEEA39)
-I (..\source\bsp.h)(0x6AFEE061)
-F (..\source\usb_cdc.c)(0x6AFEE722)(--c99 -c --cpu Cortex-M3 -D__MICROLIB -g -O0 --apcs=interwork --split_sections -I ..\source -I ..\..\fw_lib\CMSIS\CM3\CoreSupport -I ..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x-I C:\Keil_v5\ARM\RV31\INC-I C:\Keil_v5\ARM\CMSIS\Include-I C:\Keil_v5\ARM\Inc\ST\STM32F10x-D__UVISION_VERSION="518" -DSTM32F10X_MD-o .\obj\usb_cdc.o --omf_browse .\obj\usb_cdc.crf --depend .\obj\usb_cdc.d)
-I (..\source\usb_hw.h)(0x6AFEE0CB)
-I (C:\Keil_v5\ARM\ARMCC\include\stdint.h)(0x569DEA3A)
-I (..\source\usb_cdc.h)(0x6AFEE14D)
-I (..\source\board.h)(0x6AFF0C73)
-I (..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x\stm32f10x.h)(0x6AFEEA39)
-I (..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cm3.h)(0x6AFEEA39)
-I (..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cmInstr.h)(0x6AFEEA39)
-I (..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cmFunc.h)(0x6AFEEA39)
-I (..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x\system_stm32f10x.h)(0x6AFEEA39)
-I (..\source\proto.h)(0x6AFEFE97)

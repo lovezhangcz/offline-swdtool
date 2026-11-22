@@ -1,9 +1,0 @@
-.\obj\bsp.o: ..\source\bsp.c
-.\obj\bsp.o: ..\source\board.h
-.\obj\bsp.o: ..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x\stm32f10x.h
-.\obj\bsp.o: ..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cm3.h
-.\obj\bsp.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdint.h
-.\obj\bsp.o: ..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cmInstr.h
-.\obj\bsp.o: ..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cmFunc.h
-.\obj\bsp.o: ..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x\system_stm32f10x.h
-.\obj\bsp.o: ..\source\bsp.h
