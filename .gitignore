@@ -153,3 +153,10 @@ Desktop.ini
 *.zip
 *.rar
 *.7z
+
+# ==================================================
+# 九、本项目专用输出目录
+# ==================================================
+Stm32F103_SWDTOOL/app_offline_prog/project/obj/
+Stm32F103_SWDTOOL/app_offline_prog/project/list/
+Stm32F103_SWDTOOL/app_offline_prog/build_check/
