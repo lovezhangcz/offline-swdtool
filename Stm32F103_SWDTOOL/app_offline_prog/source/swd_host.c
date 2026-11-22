@@ -2,7 +2,12 @@
   * @file  swd_host.c
   * @brief SWD 主机位带驱动 (ARM ADIv5)
   *
-  *   事务时序 (LSB 先传):
+  *   时序策略 (移植自 blackmagic swdptap.c):
+  *     - 每个位原语以下降沿结束; 时钟低电平期间就摆好输出数据
+  *     - 输入在上升沿到来之前采样 (前一下降沿后目标已驱动稳定)
+  *     - SWDIO 方向带缓存: 方向没变就不重新配置引脚 (减少毛刺窗口)
+  *
+  *   事务结构 (LSB 先传):
   *     请求(8b host) -> Trn(1clk) -> ACK(3b target)
   *     读: -> 数据(32b+parity target) -> Trn -> host 接管
   *     写: -> Trn -> 数据(32b+parity host)
@@ -19,10 +24,26 @@
 #define SWDIO_L()   (SWD_GPIO->BRR  = (1u << SWDIO_PIN))
 #define SWDIO_RD()  ((SWD_GPIO->IDR >> SWDIO_PIN) & 1u)
 
+/* SWDIO 方向缓存: 0=输入(释放总线) 1=输出; 0xFF=未知, 强制重新配置 */
+#define DIR_IN     0u
+#define DIR_OUT    1u
+#define DIR_UNK    0xFFu
+static uint8_t s_dir = DIR_UNK;
+
 /* MODE=11(50MHz) CNF=00 推挽 -> 0x3 ; CNF=10 上下拉输入 MODE=00 -> 0x8 */
-static void swdio_out(void) { BSP_PinConfig(SWD_GPIO, SWDIO_PIN, 0x3u); }
-static void swdio_in(void)  { BSP_PinConfig(SWD_GPIO, SWDIO_PIN, 0x8u);
-                              SWDIO_H(); /* 上拉 */ }
+static void swdio_out(void)
+{
+    if (s_dir == DIR_OUT) return;        /* 方向没变, 不动引脚配置 */
+    BSP_PinConfig(SWD_GPIO, SWDIO_PIN, 0x3u);
+    s_dir = DIR_OUT;
+}
+static void swdio_in(void)
+{
+    if (s_dir == DIR_IN) return;
+    BSP_PinConfig(SWD_GPIO, SWDIO_PIN, 0x8u);
+    SWDIO_H(); /* 上拉 */
+    s_dir = DIR_IN;
+}
 
 static void swd_delay(void)
 {
@@ -56,6 +77,7 @@ void SWD_ReleaseNRST(void)
 
 void SWD_GPIO_Init(void)
 {
+    s_dir = DIR_UNK;                        /* 引脚状态未知, 强制重配 */
     /* SWCLK 推挽输出, 空闲低 */
     BSP_PinConfig(SWD_GPIO, SWCLK_PIN, 0x3u);
     SWCLK_L();
@@ -68,11 +90,13 @@ void SWD_GPIO_Init(void)
 void SWD_GPIO_Release(void)
 {
     SWD_ReleaseNRST();
+    s_dir = DIR_UNK;
     BSP_PinConfig(SWD_GPIO, SWCLK_PIN, 0x8u);   /* 上拉输入 */
     swdio_in();
 }
 
 /* ------------------------------------------------ 位收发 ----------------- */
+/* 输出: 时钟低电平期间摆好数据, 再给出上升沿 (下降沿后即驱动, 建立时间最大) */
 static void swd_write_bits(uint32_t val, uint8_t n)
 {
     while (n--) {
@@ -82,14 +106,16 @@ static void swd_write_bits(uint32_t val, uint8_t n)
     }
 }
 
+/* 输入: 在上升沿到来之前采样 (前一下降沿后目标已把数据驱动稳定),
+   采样后立即抬钟, 保持时间要求最低 —— blackmagic swdptap 策略 */
 static uint32_t swd_read_bits(uint8_t n)
 {
     uint32_t v = 0, s = 0;
     while (n--) {
         swd_delay();
+        if (SWDIO_RD()) v |= (1u << s); /* 上升沿前采样 */
         SWCLK_H();
-        swd_delay();            /* 等目标数据稳定 */
-        if (SWDIO_RD()) v |= (1u << s);
+        swd_delay();
         SWCLK_L();
         s++;
     }
@@ -312,6 +338,26 @@ uint8_t SWD_Mem_ReadBlock(uint32_t addr, uint32_t *buf, uint32_t nwords)
         buf++;
     }
     return SWD_DP_Read(0xCu, buf);              /* 最后一个字经 RDBUFF */
+}
+
+/* 块写: TAR 地址自增, 连续写 DRW (用于下载烧录算法到目标 RAM) */
+uint8_t SWD_Mem_WriteBlock(uint32_t addr, const uint32_t *buf, uint32_t nwords)
+{
+    uint8_t r;
+
+    if (nwords == 0) return SWD_OK;
+    r = swd_csw(CSW_32_INC);
+    if (r != SWD_OK) return r;
+    r = SWD_AP_Write(AP_TAR, addr);
+    if (r != SWD_OK) return r;
+
+    while (nwords--) {
+        r = swd_transfer_retry(swd_make_req(1, 0, (uint8_t)((AP_DRW >> 2) & 3u)),
+                               (uint32_t *)buf, 1);
+        if (r != SWD_OK) return r;
+        buf++;
+    }
+    return SWD_OK;
 }
 
 /* ------------------------------------------------ 连接 ------------------- */

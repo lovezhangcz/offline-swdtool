@@ -1,14 +1,14 @@
 /**
   * @file  target_prog.h
-  * @brief 通过 SWD 对目标 STM32F103 进行离线烧录
+  * @brief 通过 SWD 对目标芯片进行离线烧录
   *
-  *   流程: SWD 连接 -> 停机 -> 解锁 FPEC -> 全片擦除 -> 半字编程 ->
-  *         CRC32 回读校验 -> 复位目标
+  *   流程: SWD 连接 -> 停机 -> 下载 Keil FLM 烧录算法到目标 RAM ->
+  *         Init -> 全片擦除 -> 按页 ProgramPage -> CRC32 回读校验 -> 复位目标
   *
   *   说明:
   *   - 目标 DBGMCU 的 IWDG/WWDG 调试冻结位会被置位, 防止烧录过程被看门狗打断
-  *   - 采用 AHB-AP 直接操作目标 FPEC 寄存器, 无需向目标 RAM 下载算法
-  *   - 32KB 镜像全程约 10~20 秒 (SWD ~1MHz)
+  *   - 烧录算法 (tools/flm2blob.py 从 Keil .FLM 生成) 在目标 RAM 中执行,
+  *     按 TARGET_CHIP 选择 GD32F1x0 / STM32F1 算法
   */
 #ifndef __TARGET_PROG_H
 #define __TARGET_PROG_H
@@ -17,7 +17,7 @@
 
 #define TP_OK              0u
 #define TP_ERR_CONNECT     1u    /* SWD 连接失败/无目标 */
-#define TP_ERR_IDCODE      2u    /* 不是 STM32F1 目标 */
+#define TP_ERR_IDCODE      2u    /* 目标身份不符 */
 #define TP_ERR_HALT        3u
 #define TP_ERR_UNLOCK      4u    /* FPEC 解锁失败 */
 #define TP_ERR_PROTECTED   5u    /* 目标有读保护/写保护 */
@@ -25,6 +25,7 @@
 #define TP_ERR_WRITE       7u
 #define TP_ERR_VERIFY      8u    /* CRC 校验不一致 */
 #define TP_ERR_NOIMAGE     9u
+#define TP_ERR_ALGO        10u   /* 烧录算法执行失败 */
 
 /**
   * 执行一次完整烧录

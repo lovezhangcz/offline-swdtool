@@ -44,5 +44,7 @@ uint8_t SWD_Mem_Write16(uint32_t addr, uint16_t val);
 
 /* 连续读 (地址自增, 用于校验回读): nwords 个 32 位字 */
 uint8_t SWD_Mem_ReadBlock(uint32_t addr, uint32_t *buf, uint32_t nwords);
+/* 连续写 (地址自增, 用于下载烧录算法/数据到目标 RAM) */
+uint8_t SWD_Mem_WriteBlock(uint32_t addr, const uint32_t *buf, uint32_t nwords);
 
 #endif
