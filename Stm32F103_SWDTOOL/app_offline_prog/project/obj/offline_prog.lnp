@@ -1,0 +1,16 @@
+--cpu Cortex-M3
+".\obj\startup_stm32f10x_md.o"
+".\obj\system_stm32f10x.o"
+".\obj\main.o"
+".\obj\bsp.o"
+".\obj\crc.o"
+".\obj\storage.o"
+".\obj\proto.o"
+".\obj\target_prog.o"
+".\obj\swd_host.o"
+".\obj\usb_hw.o"
+".\obj\usb_cdc.o"
+--library_type=microlib --strict --scatter ".\obj\offline_prog.sct"
+--summary_stderr --info summarysizes --map --callgraph --symbols
+--info sizes
+--list ".\list\offline_prog.map" -o .\obj\offline_prog.axf

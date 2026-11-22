@@ -1,0 +1,14 @@
+.\obj\target_prog.o: ..\source\target_prog.c
+.\obj\target_prog.o: ..\source\target_prog.h
+.\obj\target_prog.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdint.h
+.\obj\target_prog.o: ..\source\swd_host.h
+.\obj\target_prog.o: ..\source\storage.h
+.\obj\target_prog.o: ..\source\board.h
+.\obj\target_prog.o: ..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x\stm32f10x.h
+.\obj\target_prog.o: ..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cm3.h
+.\obj\target_prog.o: ..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cmInstr.h
+.\obj\target_prog.o: ..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cmFunc.h
+.\obj\target_prog.o: ..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x\system_stm32f10x.h
+.\obj\target_prog.o: ..\source\proto.h
+.\obj\target_prog.o: ..\source\crc.h
+.\obj\target_prog.o: ..\source\bsp.h

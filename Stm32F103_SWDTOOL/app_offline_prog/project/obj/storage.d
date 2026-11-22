@@ -1,0 +1,9 @@
+.\obj\storage.o: ..\source\storage.c
+.\obj\storage.o: ..\source\storage.h
+.\obj\storage.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdint.h
+.\obj\storage.o: ..\source\board.h
+.\obj\storage.o: ..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x\stm32f10x.h
+.\obj\storage.o: ..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cm3.h
+.\obj\storage.o: ..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cmInstr.h
+.\obj\storage.o: ..\..\fw_lib\CMSIS\CM3\CoreSupport\core_cmFunc.h
+.\obj\storage.o: ..\..\fw_lib\CMSIS\CM3\DeviceSupport\ST\STM32F10x\system_stm32f10x.h
