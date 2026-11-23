@@ -2,8 +2,12 @@
  * 来源: GD32F1x0_64.FLM
  * 设备: GD32F1x0 64KB  flash=0x08000000+0x10000  page=1024B
  * sectors: 0x0+0x400
+ *
+ * L1优化: 仅在 TARGET_CHIP == TARGET_CHIP_GD32F1X0 时编译, 节省 Flash
  */
 #include "flash_blob.h"
+
+#if TARGET_CHIP == TARGET_CHIP_GD32F1X0
 
 static const uint32_t flash_code[] = {
     0xE00ABE00, 0x062D780D, 0x24084068, 0xD3000040, 0x1E644058, 0x1C49D1FA, 0x2A001E52, 0x4770D1F2,
@@ -37,3 +41,5 @@ const flash_algo_t FLASH_ALGO_GD32F1X0 = {
     3000u,        /* erase_timeout_ms */
     "GD32F1x0 64KB",
 };
+
+#endif /* TARGET_CHIP == TARGET_CHIP_GD32F1X0 */

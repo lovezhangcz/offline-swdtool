@@ -27,6 +27,19 @@
 #define TP_ERR_NOIMAGE     9u
 #define TP_ERR_ALGO        10u   /* 烧录算法执行失败 */
 
+/* 烧录状态 (main.c / target_prog.c / proto.c 共享) */
+typedef struct {
+    volatile uint8_t  state;
+    volatile uint8_t  last_result;  /* 0=无 1=成功 2=失败 */
+    volatile uint32_t last_error;
+    volatile uint32_t target_dpidr;
+    volatile uint32_t target_idcode;
+    volatile uint32_t progress;     /* 已烧录字节数 */
+    volatile uint32_t swd_err;
+} prog_status_t;
+
+extern prog_status_t g_status;
+
 /**
   * 执行一次完整烧录
   * @param[out] err_addr  出错时的相关地址 (可选 NULL)

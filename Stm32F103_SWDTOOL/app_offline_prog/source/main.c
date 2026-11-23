@@ -3,10 +3,12 @@
   * @brief 离线编程器主程序
   *
   *   工作流程:
-  *   1. 上位机经 USB CDC 下发目标固件, 存入本机 flash 镜像区
-  *   2. 主循环每 300ms 探测 SWCLK/SWDIO 上是否有目标芯片
+  *   1. 固件镜像写入本机 flash 镜像区
+  *      - CDC 模式: 上位机经 USB CDC 下发
+  *      - MSC 模式: 用户把 .bin 文件拖入 U 盘
+  *   2. 主循环每 DETECT_INTERVAL_MS 探测 SWCLK/SWDIO 上是否有目标芯片
   *   3. 探测到新目标且镜像有效 -> 自动擦除/烧录/校验/复位
-  *   4. 一次接入只烧录一次, 目标拔出后重新待命 (也可用 PROG_NOW 手动触发)
+  *   4. 一次接入只烧录一次, 目标拔出后重新待命
   *
   *   LED (PB12 低电平亮):
   *     无镜像        : 1Hz 慢闪
@@ -17,13 +19,19 @@
   */
 #include "board.h"
 #include "bsp.h"
-#include "usb_cdc.h"
-#include "proto.h"
 #include "storage.h"
 #include "swd_host.h"
 #include "target_prog.h"
 
-/* proto.h 中的状态字节定义 */
+#if USB_MODE == USB_MODE_CDC
+  #include "usb_cdc.h"
+  #include "proto.h"
+#else /* USB_MODE_MSC */
+  #include "usb_msc.h"
+  #include "vfs.h"
+#endif
+
+/* 状态字节定义 (与 proto.h 中的定义一致, 这里也保留一份避免依赖) */
 #define ST_NO_IMAGE        0u
 #define ST_ARMED           1u
 #define ST_PROGRAMMING     2u
@@ -72,7 +80,9 @@ static void do_program(void)
     uint32_t err_addr = 0;
     uint8_t r;
 
+#if USB_MODE == USB_MODE_CDC
     (void)Proto_TakeProgRequest();          /* 清掉烧录期间可能积下的手动触发 */
+#endif
     s_state = ST_PROGRAMMING;
     g_status.state = ST_PROGRAMMING;
     g_status.progress = 0;
@@ -100,8 +110,18 @@ int main(void)
     uint32_t t_detect = 0;
 
     BSP_Init();
+
+#if USB_MODE == USB_MODE_CDC
     Proto_Init();
     USB_CDC_Init();
+#else /* USB_MODE_MSC */
+    USB_MSC_InitDesc();
+    VFS_Init();
+    /* USB_HW_Init 在 USB_CDC_Init / MSC 初始化中调用?
+     * 不, CDC 模式下 USB_CDC_Init 内部会调 USB_HW_Init.
+     * MSC 模式下, 我们直接调用 USB_HW_Init. */
+    USB_HW_Init();
+#endif
 
     g_status.state = ST_NO_IMAGE;
     g_status.last_result = 0;
@@ -115,11 +135,13 @@ int main(void)
     g_status.state = s_state;
 
     for (;;) {
+#if USB_MODE == USB_MODE_CDC
         Proto_Poll();                       /* 处理上位机命令 */
         USB_CDC_Poll();
+#endif
         led_update();
 
-        /* 镜像状态可能因上位机下载而改变 */
+        /* 镜像状态可能因上位机/U盘写入而改变 */
         if (s_state == ST_NO_IMAGE && Storage_ImageValid()) {
             s_state = ST_ARMED;
             g_status.state = s_state;
@@ -130,10 +152,12 @@ int main(void)
 
         if (s_state == ST_PROGRAMMING) continue;
 
-        /* 手动触发 */
+#if USB_MODE == USB_MODE_CDC
+        /* 手动触发 (CDC 模式下上位机可发 PROG_NOW 命令) */
         if (Proto_TakeProgRequest()) {
             if (Storage_ImageValid()) { do_program(); continue; }
         }
+#endif
 
         /* 每 DETECT_INTERVAL_MS 探测目标 */
         if ((BSP_Millis() - t_detect) < DETECT_INTERVAL_MS) continue;

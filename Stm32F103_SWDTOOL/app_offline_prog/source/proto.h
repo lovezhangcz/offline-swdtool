@@ -21,19 +21,7 @@
 #define __PROTO_H
 
 #include <stdint.h>
-
-/* 运行状态 (proto 与 main 共享) */
-typedef struct {
-    volatile uint8_t  state;        /* 见 main.c 中 PROG_STATE_xxx */
-    volatile uint8_t  last_result;  /* 0=无 1=成功 2=失败 */
-    volatile uint32_t last_error;   /* target_prog 错误码 */
-    volatile uint32_t target_dpidr; /* 目标 DP IDR */
-    volatile uint32_t target_idcode;/* 目标 DBGMCU_IDCODE */
-    volatile uint32_t progress;     /* 已烧录字节数 */
-    volatile uint32_t swd_err;      /* SWD 层子错误码 (SWD_ERR_xxx, 0=OK) */
-} prog_status_t;
-
-extern prog_status_t g_status;
+#include "target_prog.h"   /* prog_status_t / g_status 共享定义 */
 
 void Proto_Init(void);
 void Proto_RxBytes(const uint8_t *data, uint16_t len);   /* USB ISR 上下文 */

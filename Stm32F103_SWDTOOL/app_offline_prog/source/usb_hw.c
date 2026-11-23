@@ -3,12 +3,19 @@
   * @brief STM32F103 USB FS 设备控制器底层驱动实现
   *
   *   PMA (512B, BTABLE=0) 布局:
-  *     0x00 - 0x3F : 端点缓冲描述表
-  *     0x40 - 0x7F : EP0 TX (64B)
-  *     0x80 - 0xBF : EP0 RX (64B)
-  *     0xC0 - 0xCF : EP1 TX (16B, interrupt IN)
-  *     0xD0 - 0x10F: EP2 RX (64B, bulk OUT)
-  *     0x110- 0x14F: EP3 TX (64B, bulk IN)
+  *     CDC 模式:
+  *       0x00 - 0x3F : BTABLE
+  *       0x40 - 0x7F : EP0 TX (64B)
+  *       0x80 - 0xBF : EP0 RX (64B)
+  *       0xC0 - 0xCF : EP1 TX (16B, interrupt IN)
+  *       0xD0 - 0x10F: EP2 RX (64B, bulk OUT)
+  *       0x110- 0x14F: EP3 TX (64B, bulk IN)
+  *     MSC 模式:
+  *       0x00 - 0x3F : BTABLE
+  *       0x40 - 0x7F : EP0 TX (64B)
+  *       0x80 - 0xBF : EP0 RX (64B)
+  *       0xC0 - 0xFF : EP1 RX (64B, bulk OUT)
+  *       0x100- 0x13F: EP2 TX (64B, bulk IN)
   *
   *   注意: F103 的 D+ 上拉电阻没有片内开关, 若板子上有 GPIO 控制的三极管
   *   上拉, 需要在 USB_HW_Init 里自行拉高对应引脚; 固定上拉则无需处理。
@@ -68,12 +75,22 @@
 #define BTAB_RX_ADDR(ep)    PMA_U16((ep) * 8u + 4u)
 #define BTAB_RX_CNT(ep)     PMA_U16((ep) * 8u + 6u)
 
-/* PMA 缓冲区偏移 */
+/* ---- PMA 缓冲区布局 (按 USB_MODE 切换) ---- */
 #define EP0_TX_BUF   0x040u
 #define EP0_RX_BUF   0x080u
-#define EP1_TX_BUF   0x0C0u
-#define EP2_RX_BUF   0x0D0u
-#define EP3_TX_BUF   0x110u
+
+#if USB_MODE == USB_MODE_CDC
+  #define EP1_TX_BUF   0x0C0u   /* 16B interrupt IN */
+  #define EP2_RX_BUF   0x0D0u   /* 64B bulk OUT */
+  #define EP3_TX_BUF   0x110u   /* 64B bulk IN  */
+  #define BULK_RX_BUF  EP2_RX_BUF
+  #define BULK_TX_BUF  EP3_TX_BUF
+#else /* USB_MODE_MSC */
+  #define EP1_RX_BUF   0x0C0u   /* 64B bulk OUT */
+  #define EP2_TX_BUF   0x100u   /* 64B bulk IN  */
+  #define BULK_RX_BUF  EP1_RX_BUF
+  #define BULK_TX_BUF  EP2_TX_BUF
+#endif
 
 /* RX 缓冲尺寸描述: 64B -> BL_SIZE=1, NUM_BLOCK=2 */
 #define RXSIZE_64           0x8800u
@@ -155,8 +172,6 @@ void USB_PMA_Read(uint16_t pma_off, uint8_t *buf, uint16_t len)
 void USB_EP_Config(uint8_t ep, uint16_t type, uint16_t rx_addr, uint16_t rx_size,
                    uint16_t tx_addr)
 {
-    /* EA 必须等于端点号, 否则硬件无法按地址路由令牌;
-       DTOG 位如为 1 则写 1 翻转回 0 (同步 DATA0) */
     uint16_t r = ep_rd(ep);
     uint16_t v = (uint16_t)(type | ep);
     if (r & EPR_DTOG_RX) v |= EPR_DTOG_RX;
@@ -181,16 +196,22 @@ void USB_SetAddress(uint8_t addr)
 static void usb_endpoints_reset(void)
 {
     /* 总线复位后: 重新配置全部端点, 等待主机重新枚举 */
-    USB_EP_Config(USB_EP0, EP_TYPE_CONTROL,   EP0_RX_BUF, RXSIZE_64, EP0_TX_BUF);
-    USB_EP_Config(USB_EP1, EP_TYPE_INTERRUPT, 0,          RXSIZE_16, EP1_TX_BUF);
-    USB_EP_Config(USB_EP2, EP_TYPE_BULK,      EP2_RX_BUF, RXSIZE_64, 0);
-    USB_EP_Config(USB_EP3, EP_TYPE_BULK,      0,          RXSIZE_16, EP3_TX_BUF);
+    USB_EP_Config(USB_EP0, EP_TYPE_CONTROL,   EP0_RX_BUF,  RXSIZE_64, EP0_TX_BUF);
+
+#if USB_MODE == USB_MODE_CDC
+    USB_EP_Config(USB_EP1, EP_TYPE_INTERRUPT, 0,           RXSIZE_16, EP1_TX_BUF);
+    USB_EP_Config(USB_EP2, EP_TYPE_BULK,      EP2_RX_BUF,  RXSIZE_64, 0);
+    USB_EP_Config(USB_EP3, EP_TYPE_BULK,      0,           RXSIZE_16, EP3_TX_BUF);
+#else /* USB_MODE_MSC */
+    USB_EP_Config(USB_BULK_OUT_EP, EP_TYPE_BULK, BULK_RX_BUF, RXSIZE_64, 0);
+    USB_EP_Config(USB_BULK_IN_EP,  EP_TYPE_BULK, 0,          RXSIZE_16, BULK_TX_BUF);
+#endif
 
     /* EP0: RX VALID 准备接收 SETUP, TX NAK */
     USB_EP_SetRxStatus(USB_EP0, USB_STAT_VALID);
     USB_EP_SetTxStatus(USB_EP0, USB_STAT_NAK);
-    /* 数据 OUT 端点打开 */
-    USB_EP_SetRxStatus(USB_EP2, USB_STAT_VALID);
+    /* 批量 OUT 端点打开接收 */
+    USB_EP_SetRxStatus(USB_BULK_OUT_EP, USB_STAT_VALID);
 
     USB_SetAddress(0);
     USB_CB_Reset();
@@ -263,22 +284,24 @@ void USB_LP_CAN1_RX0_IRQHandler(void)
                     USB_EP_ClearTxCTR(USB_EP0);
                     USB_CB_EP0_TxDone();
                 }
-            } else if (ep == USB_EP2) {
+            } else if (ep == USB_BULK_OUT_EP) {
                 if (r & EPR_CTR_RX) {
-                    uint16_t cnt = USB_EP_GetRxCount(USB_EP2);
+                    uint16_t cnt = USB_EP_GetRxCount(USB_BULK_OUT_EP);
                     uint8_t buf[64];
-                    USB_PMA_Read(USB_EP_GetRxAddr(USB_EP2), buf, cnt);
-                    USB_EP_ClearRxCTR(USB_EP2);
+                    USB_PMA_Read(USB_EP_GetRxAddr(USB_BULK_OUT_EP), buf, cnt);
+                    USB_EP_ClearRxCTR(USB_BULK_OUT_EP);
                     USB_CB_BulkOut(buf, cnt);
-                    USB_EP_SetRxStatus(USB_EP2, USB_STAT_VALID);
+                    USB_EP_SetRxStatus(USB_BULK_OUT_EP, USB_STAT_VALID);
                 }
-            } else if (ep == USB_EP3) {
+            } else if (ep == USB_BULK_IN_EP) {
                 if (r & EPR_CTR_TX) {
-                    USB_EP_ClearTxCTR(USB_EP3);
+                    USB_EP_ClearTxCTR(USB_BULK_IN_EP);
                     USB_CB_BulkInDone();
                 }
             }
-            /* EP1 不使用 */
+#if USB_MODE == USB_MODE_CDC
+            /* EP1 (CDC 中断通知) 不发送数据, 忽略 TX 完成 */
+#endif
             continue;
         }
         /* 其余未使能的标志不会置位; 防御性清除可写位 */

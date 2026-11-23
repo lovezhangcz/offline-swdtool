@@ -4,17 +4,32 @@
   *        - 寄存器/PMA 直接操作, 不依赖 ST USB 库
   *        - 端点缓冲表(BTABLE=0) 静态布局
   *        - 上层通过回调接收: 总线复位 / EP0 SETUP / EP0 数据完成 / 批量端点收发
+  *
+  *   端点分配 (按 USB_MODE 切换):
+  *     CDC 模式: EP0=Ctrl, EP1=IntIn(通知), EP2=BulkOut, EP3=BulkIn
+  *     MSC 模式: EP0=Ctrl, EP1=BulkOut, EP2=BulkIn
   */
 #ifndef __USB_HW_H
 #define __USB_HW_H
 
 #include <stdint.h>
+#include "board.h"
 
 /* 端点号 */
-#define USB_EP0   0u
-#define USB_EP1   1u   /* CDC 通知 (interrupt IN, 仅声明不发送) */
-#define USB_EP2   2u   /* CDC 数据 OUT (bulk) */
-#define USB_EP3   3u   /* CDC 数据 IN  (bulk) */
+#define USB_EP0       0u
+
+#if USB_MODE == USB_MODE_CDC
+  #define USB_EP1     1u   /* CDC 通知 (interrupt IN, 仅声明不发送) */
+  #define USB_EP2     2u   /* CDC 数据 OUT (bulk) */
+  #define USB_EP3     3u   /* CDC 数据 IN  (bulk) */
+  #define USB_BULK_OUT_EP  USB_EP2
+  #define USB_BULK_IN_EP   USB_EP3
+#else /* USB_MODE_MSC */
+  #define USB_EP1     1u   /* MSC 数据 OUT (bulk) */
+  #define USB_EP2     2u   /* MSC 数据 IN  (bulk) */
+  #define USB_BULK_OUT_EP  USB_EP1
+  #define USB_BULK_IN_EP   USB_EP2
+#endif
 
 /* 状态值 (EPnR STAT_RX/STAT_TX) */
 #define USB_STAT_DISABLED   0u
@@ -43,12 +58,12 @@ uint16_t USB_EP_GetRxCount(uint8_t ep);
 uint16_t USB_EP_GetTxAddr(uint8_t ep);
 uint16_t USB_EP_GetRxAddr(uint8_t ep);
 
-/* ---- 上层回调 (由 usb_cdc.c 实现) ---- */
+/* ---- 上层回调 (CDC 模式由 usb_cdc.c 实现, MSC 模式由 usb_msc.c 实现) ---- */
 void USB_CB_Reset(void);
 void USB_CB_Setup(const uint8_t *pkt);                 /* 8 字节 SETUP 包 */
 void USB_CB_EP0_TxDone(void);
 void USB_CB_EP0_RxDone(uint16_t len);
-void USB_CB_BulkOut(const uint8_t *data, uint16_t len);
-void USB_CB_BulkInDone(void);
+void USB_CB_BulkOut(const uint8_t *data, uint16_t len);   /* 批量 OUT 数据 */
+void USB_CB_BulkInDone(void);                            /* 批量 IN 发送完成 */
 
 #endif

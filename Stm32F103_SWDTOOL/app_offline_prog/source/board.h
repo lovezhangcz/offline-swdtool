@@ -32,6 +32,17 @@
 #define LED_OFF()           (LED_GPIO->BSRR = (1u << LED_PIN))
 #define LED_TOGGLE()        do { if (LED_GPIO->ODR & (1u<<LED_PIN)) LED_ON(); else LED_OFF(); } while(0)
 
+/* ------------------------------------------------------- USB 模式选择 ---- */
+/* USB_MODE_CDC : 虚拟串口 + 二进制协议 (当前方式, 需上位机 swdtool.py)
+ * USB_MODE_MSC : U 盘拖放烧录 (把 .bin 文件拖入 U 盘即更新镜像)
+ *   两种模式二选一, 通过宏切换, 不共存 (节省 Flash/RAM)               */
+#define USB_MODE_CDC        1
+#define USB_MODE_MSC        2
+
+#ifndef USB_MODE
+#define USB_MODE            USB_MODE_MSC
+#endif
+
 /* ------------------------------------------------------- USB D+ 上拉 ----- */
 /* F103 的 USB 外设没有片内 D+ 上拉开关。
  * 若板子上 1.5k 上拉电阻固定接 3.3V: 保持 USB_PULLUP_PIN 未定义即可。
@@ -40,6 +51,15 @@
 #define USB_PULLUP_PORT     GPIOA
 #define USB_PULLUP_PIN      9u
 #define USB_PULLUP_ACTIVE   1u      /* 1=高电平接入, 0=低电平接入; 若不枚举改成 0 试 */
+
+/* ------------------------------------------------------- MSC 磁盘参数 ---- */
+#if USB_MODE == USB_MODE_MSC
+/* 虚拟磁盘容量 (必须是 512 字节扇区的整数倍)
+ * 比镜像存储区略小即可, 因为 FAT 表和目录项要占几个扇区 */
+#define MSC_DISK_SIZE       IMG_STORE_SIZE
+#define MSC_SECTOR_SIZE     512u
+#define MSC_VOLUME_LABEL    "SWDPROG   "   /* 11 字符, 不足补空格 */
+#endif
 
 /* ------------------------------------------------------- 目标芯片选择 ---- */
 /* TARGET_CHIP_STM32F1  : STM32F101/103 系列 (DEV_ID 0x410/412/414/418/430..)
