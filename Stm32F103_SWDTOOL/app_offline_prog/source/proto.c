@@ -9,6 +9,8 @@
 #include "target_prog.h"
 #include "crc.h"
 
+#if USB_MODE == USB_MODE_CDC
+
 #define FRAME_HDR0   0xAAu
 #define FRAME_HDR1   0x55u
 
@@ -290,3 +292,5 @@ void Proto_Poll(void)
         proto_feed(b);
     }
 }
+
+#endif /* USB_MODE == USB_MODE_CDC */

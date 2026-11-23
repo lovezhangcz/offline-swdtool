@@ -1,0 +1,1 @@
+这是一个离线烧录器开发项目，Stm32F103_SWDTOOL是目标项目所在文件夹，里面有嵌入式主工程app_offline_prog，一个小的测试板小工程testprj，另外download_ref是从网上下载的参考案例，lcdprd_ref是一个单独的带LCD屏的案例的参考资料

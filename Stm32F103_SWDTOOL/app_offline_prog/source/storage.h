@@ -22,6 +22,12 @@ uint8_t  Storage_ImageValid(void);
 /* 擦除整个存储区 */
 uint8_t  Storage_Erase(void);
 
+/* 只擦除 offset 所在的一页 (offset 相对存储区起点, 需页对齐) */
+uint8_t  Storage_ErasePage(uint32_t offset);
+
+/* 仅擦除并更新头部所在的第一页 (不影响数据区) */
+uint8_t  Storage_UpdateHeader(const img_hdr_t *hdr);
+
 /* 向存储区写数据: offset 相对存储区起点(含头), 半字对齐自动补 0xFF */
 uint8_t  Storage_Write(uint32_t offset, const uint8_t *data, uint32_t len);
 

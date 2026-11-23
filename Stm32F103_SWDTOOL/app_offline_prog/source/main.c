@@ -29,6 +29,7 @@
 #else /* USB_MODE_MSC */
   #include "usb_msc.h"
   #include "vfs.h"
+  #include "usb_hw.h"
 #endif
 
 /* 状态字节定义 (与 proto.h 中的定义一致, 这里也保留一份避免依赖) */

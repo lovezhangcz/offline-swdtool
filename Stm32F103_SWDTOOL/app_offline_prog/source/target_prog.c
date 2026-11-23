@@ -6,10 +6,16 @@
 #include "swd_host.h"
 #include "flash_algo.h"
 #include "storage.h"
-#include "proto.h"
 #include "crc.h"
 #include "bsp.h"
 #include "board.h"
+
+#if USB_MODE == USB_MODE_CDC
+  #include "proto.h"
+  #define USBD_POLL()    Proto_Poll()     /* CDC: 处理上位机命令 */
+#else
+  #define USBD_POLL()    ((void)0)       /* MSC: USB 中断已处理, 主循环不需轮询 */
+#endif
 
 /* ---- Cortex-M 内核寄存器 ---- */
 #define DHCSR        0xE000EDF0u
@@ -197,7 +203,7 @@ uint8_t TargetProg_Run(uint32_t *err_addr)
                 }
 
                 g_status.progress = addr + chunk;   /* 每页汇报 */
-                Proto_Poll();                       /* 保持 USB 协议可响应 */
+                USBD_POLL();                        /* 保持 USB 响应 */
             }
         }
 

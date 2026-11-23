@@ -1,0 +1,21 @@
+--cpu Cortex-M3
+".\obj_cdc\startup_stm32f10x_md.o"
+".\obj_cdc\system_stm32f10x.o"
+".\obj_cdc\main.o"
+".\obj_cdc\bsp.o"
+".\obj_cdc\crc.o"
+".\obj_cdc\storage.o"
+".\obj_cdc\proto.o"
+".\obj_cdc\target_prog.o"
+".\obj_cdc\flash_algo.o"
+".\obj_cdc\flash_algo_gd32f1x0.o"
+".\obj_cdc\flash_algo_stm32f1.o"
+".\obj_cdc\swd_host.o"
+".\obj_cdc\usb_hw.o"
+".\obj_cdc\usb_cdc.o"
+".\obj_cdc\usb_msc.o"
+".\obj_cdc\vfs.o"
+--library_type=microlib --strict --scatter ".\obj_cdc\offline_prog_cdc.sct"
+--summary_stderr --info summarysizes --map --load_addr_map_info --callgraph --symbols
+--info sizes
+--list ".\list_cdc\offline_prog_cdc.map" -o .\obj_cdc\offline_prog_cdc.axf

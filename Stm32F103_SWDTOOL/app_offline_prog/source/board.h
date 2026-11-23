@@ -70,15 +70,18 @@
 #define TARGET_CHIP_GD32F1X0    2
 
 #ifndef TARGET_CHIP
-#define TARGET_CHIP             TARGET_CHIP_GD32F1X0
+#define TARGET_CHIP             TARGET_CHIP_STM32F1
 #endif
 
 /* ---------------------------------------------------------------- SWD ---- */
 #define SWD_GPIO            GPIOA
 #define SWD_RCC             RCC_APB2Periph_GPIOA
 /* 注: 若目标无应答/异常, 可交换两引脚定义再试 (3<->4) */
-#define SWCLK_PIN           3u
-#define SWDIO_PIN           4u
+//#define SWCLK_PIN           3u
+//#define SWDIO_PIN           4u
+
+#define SWCLK_PIN           4u
+#define SWDIO_PIN           3u
 
 /* 目标 NRST 控制 (可选): 定义后, 连接目标期间自动拉住目标复位,
    抢在目标固件启动 (进低功耗/重映射SWD脚) 之前建立调试连接。

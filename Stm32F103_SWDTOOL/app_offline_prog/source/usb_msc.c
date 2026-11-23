@@ -91,6 +91,8 @@ static void build_str(uint8_t *desc, const char *ascii, uint8_t hex_serial)
  *                      EP0 控制状态机
  * ================================================================ */
 
+static void msc_reset(void);   /* 前向声明, 在 BOT 部分定义 */
+
 static const uint8_t *s_ctrl_ptr;
 static uint16_t       s_ctrl_len;
 static uint8_t        s_set_address;
@@ -280,10 +282,10 @@ static uint16_t g_sector_pos;            /* 当前扇区内字节位置 */
 extern void VFS_ReadSector(uint32_t lba);
 extern void VFS_WriteSector(uint32_t lba);
 extern void VFS_WriteDone(void);
+extern void VFS_TryFinalize(void);
 extern uint32_t VFS_GetTotalSectors(void);
 
 /* ---- 内部函数 ---- */
-static void msc_reset(void);
 static void scsi_handle_command(const uint8_t *cdb, uint8_t cdb_len,
                                 uint32_t data_len, uint8_t dir_in);
 static void send_csw(void);
@@ -345,6 +347,9 @@ void USB_CB_BulkOut(const uint8_t *data, uint16_t len)
 
         g_data_remain = data_len;
         g_csw_status  = CSW_STATUS_PASS;
+        g_sector_pos   = 0;     /* 每个新命令从缓冲起始位置开始 */
+        g_cur_lba      = 0;
+        g_sectors_left = 0;
 
         scsi_handle_command(cdb, cb_len, data_len, (uint8_t)(flags & 0x80u));
         return;
@@ -425,6 +430,11 @@ static void scsi_handle_command(const uint8_t *cdb, uint8_t cdb_len,
     switch (opcode) {
     /* ---- 无数据命令 ---- */
     case SCSI_TEST_UNIT_READY:
+        /* 兜底: 某些系统写完数据不发 SYNCHRONIZE CACHE,
+         * 这里在确认就绪时尝试写镜像头, 避免重插后空盘 */
+        VFS_TryFinalize();
+        send_csw();
+        break;
     case SCSI_START_STOP_UNIT:
     case SCSI_PREVENT_ALLOW_REMOVAL:
     case SCSI_VERIFY_10:
@@ -445,6 +455,7 @@ static void scsi_handle_command(const uint8_t *cdb, uint8_t cdb_len,
         g_sector_buf[12] = g_asc;
         g_sense_key = SENSE_NO_SENSE;
         g_asc = 0;
+        g_sector_pos   = 0;
         g_data_remain = alloc_len;
         if (data_len < alloc_len) g_data_remain = data_len;
         g_bot_state = BOT_DATA_IN;
@@ -458,6 +469,7 @@ static void scsi_handle_command(const uint8_t *cdb, uint8_t cdb_len,
             alloc_len = (uint8_t)sizeof(scsi_inquiry_data);
         }
         memcpy(g_sector_buf, scsi_inquiry_data, alloc_len);
+        g_sector_pos   = 0;
         g_data_remain = alloc_len;
         if (data_len < alloc_len) g_data_remain = data_len;
         g_bot_state = BOT_DATA_IN;
@@ -473,6 +485,7 @@ static void scsi_handle_command(const uint8_t *cdb, uint8_t cdb_len,
         g_sector_buf[3] = 0;    /* Block Descriptor Length */
         uint8_t ret_len = 4;
         if (data_len < ret_len) ret_len = (uint8_t)data_len;
+        g_sector_pos   = 0;
         g_data_remain = ret_len;
         g_bot_state = BOT_DATA_IN;
         send_next_in_packet();
@@ -497,6 +510,7 @@ static void scsi_handle_command(const uint8_t *cdb, uint8_t cdb_len,
         g_sector_buf[11] = (uint8_t)MSC_SECTOR_SZ;
         uint8_t ret_len = 12;
         if (data_len < ret_len) ret_len = (uint8_t)data_len;
+        g_sector_pos   = 0;
         g_data_remain = ret_len;
         g_bot_state = BOT_DATA_IN;
         send_next_in_packet();
@@ -514,6 +528,7 @@ static void scsi_handle_command(const uint8_t *cdb, uint8_t cdb_len,
         g_sector_buf[5] = 0;
         g_sector_buf[6] = (uint8_t)(MSC_SECTOR_SZ >> 8);
         g_sector_buf[7] = (uint8_t)MSC_SECTOR_SZ;
+        g_sector_pos   = 0;
         g_data_remain = 8;
         g_bot_state = BOT_DATA_IN;
         send_next_in_packet();

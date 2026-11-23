@@ -8,6 +8,10 @@
 #include "usb_hw.h"
 #include "usb_cdc.h"
 #include "board.h"
+
+#if USB_MODE == USB_MODE_CDC
+
+#include <string.h>
 #include "proto.h"
 
 /* ------------------------------------------------ 描述符 ----------------- */
@@ -296,3 +300,5 @@ void USB_CDC_Init(void)
     build_str(desc_str_ser, "", 1);
     USB_HW_Init();
 }
+
+#endif /* USB_MODE == USB_MODE_CDC */

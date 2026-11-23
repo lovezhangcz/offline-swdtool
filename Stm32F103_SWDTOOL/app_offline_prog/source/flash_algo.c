@@ -12,7 +12,14 @@
 #include "flash_algo.h"
 #include "swd_host.h"
 #include "bsp.h"
-#include "proto.h"
+#include "board.h"
+
+#if USB_MODE == USB_MODE_CDC
+  #include "proto.h"
+  #define ALGO_POLL()   Proto_Poll()
+#else
+  #define ALGO_POLL()   ((void)0)
+#endif
 
 /* ---- Cortex-M 内核调试寄存器 ---- */
 #define DHCSR        0xE000EDF0u
@@ -85,7 +92,7 @@ uint8_t FlashAlgo_Call(const flash_algo_t *algo, uint32_t entry,
     /* 等待函数返回到 BKPT 而停机 */
     t0 = BSP_Millis();
     for (;;) {
-        Proto_Poll();                /* 长操作中保持 USB 协议可响应 */
+        ALGO_POLL();                 /* 长操作中保持 USB 响应 */
         if (SWD_Mem_Read32(DHCSR, &v) != SWD_OK) return FA_ERR_SWD;
         if (v & S_HALT) break;
         if ((BSP_Millis() - t0) > timeout_ms) {
