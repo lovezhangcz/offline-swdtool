@@ -3,16 +3,15 @@
 """
 联机流式烧录上位机 (纯上位机实现, 不依赖任何主板固件改动)
 
-工作流程:
-    1. 自动连接烧录器 (USB CDC 0483:5740/5742), 连接后清掉机内脱机镜像,
-       使主板自动烧录机制静默 (无镜像时主板不碰 SWD), SWD 完全由本程序接管
-    2. 每秒 4 次经 TGT_READ 发 SWD 握手 (读目标 DBGMCU_IDCODE), 连续 2 次
-       成功判定"目标板插入", 连续 3 次失败判定"目标板拔出"
-    3. 判定插入后自动流式烧录 (STRM_BEGIN/DATA/END), 实时进度条
-    4. 成功: 绿灯 + "嘟"提示音 + 成功计数; 失败: 红灯 + 低音 + 失败计数
-    5. 等目标板拔出后自动重新待命, 可连续烧下一块
-    6. 空闲时每 3 秒巡检一次: 若有人往虚拟 U 盘拖了固件(会复活主板自动
-       烧录), 自动清除并提示
+工作方式 (手动触发, 适合插板瞬间有供电浪涌的场合, 如电机控制板):
+    1. 自动连接烧录器 (USB CDC 0483:5740/5742); 空闲时每 3 秒巡检并清除机内
+       脱机镜像, 防止主板自动烧录机制与上位机抢 SWD
+    2. 后台每秒 4 次 SWD 握手 (读目标 IDCODE), 仅用于在面板上显示
+       "目标板是否就位/芯片型号", 不会自动烧录
+    3. 操作员插好目标板, 点击 [烧 录] 按钮 -> 流式烧录 -> 回读 CRC 校验
+    4. 成功: 绿灯 + "嘟"提示音 + 成功计数; 失败: 红灯 + 低音 + 失败计数;
+       烧录失败自动重试 1 次 (目标上电首次会话偶发擦除超时)
+    5. 烧录中途 USB 掉线 (供电跌落): 不计失败, 自动重连, 重新点击即可
 
 运行: 双击 online_prog.py 或  python online_prog.py
 依赖: Python3 + pyserial + tkinter(自带), 复用同目录 boot_flash.py 的协议实现
@@ -34,15 +33,19 @@ except ImportError:
 
 DETECT_ADDR = 0xE0042000          # 目标 DBGMCU_IDCODE, 用读它当 SWD 握手
 POLL_S = 0.25                     # 握手轮询间隔 (每秒 4 次)
-HIT_NEED = 2                      # 连续成功次数 -> 判定插入
-MISS_NEED = 3                     # 连续失败次数 -> 判定拔出
 PATROL_S = 3.0                    # 空闲巡检镜像间隔
 RECONNECT_S = 1.5                 # 掉线重连间隔
+SETTLE_S = 0.5                    # 重连后等供电稳定再握手
 
-# 状态 -> (LED颜色, 状态文案)
-S_NO_DEV, S_IDLE, S_WAIT, S_PROG, S_OK, S_FAIL = range(6)
-LED = {S_NO_DEV: "#808080", S_IDLE: "#808080", S_WAIT: "#18a0c8",
+# 状态 -> LED颜色
+S_NO_DEV, S_READY, S_PROG, S_OK, S_FAIL = range(5)
+LED = {S_NO_DEV: "#808080", S_READY: "#18a0c8",
        S_PROG: "#e6b800", S_OK: "#28c840", S_FAIL: "#e03030"}
+STATE_TXT = {S_NO_DEV: "设备未连接",
+             S_READY:  "就绪 - 点击 [烧 录] 开始",
+             S_PROG:   "烧录中, 请勿拔线!",
+             S_OK:     "烧录成功 ✓",
+             S_FAIL:   "烧录失败 ✗"}
 
 
 def beep_ok():
@@ -65,27 +68,22 @@ class Worker(threading.Thread):
         self.stop_evt = threading.Event()
         self.lock = threading.Lock()
         self.fw = None                # (load_addr, data, crc32, 文件名)
-        self.armed = False
-        self.clear_img_req = False
+        self.burn_req = False
 
     # ---- GUI 下发的指令 ----
     def set_firmware(self, fw):
         with self.lock:
             self.fw = fw
 
-    def set_armed(self, on):
+    def request_burn(self):
         with self.lock:
-            self.armed = on
-            if on:
-                self.clear_img_req = True     # 进入联机模式先清场
+            self.burn_req = True
 
     def snapshot(self):
         with self.lock:
-            return self.fw, self.armed, self.clear_img_req
-
-    def clr_img_req(self):
-        with self.lock:
-            self.clear_img_req = False
+            fw, burn = self.fw, self.burn_req
+            self.burn_req = False
+            return fw, burn
 
     # ---- 往 GUI 发事件 ----
     def emit(self, kind, **kw):
@@ -144,12 +142,12 @@ class Worker(threading.Thread):
     def run(self):
         app = None
         state = S_NO_DEV
-        hits = misses = 0
         last_patrol = 0.0
+        presence = None               # 最近一次握手结果 (None=无目标)
         self.emit("state", state=state)
 
         while not self.stop_evt.is_set():
-            fw, armed, clr_req = self.snapshot()
+            fw, burn = self.snapshot()
 
             # ---------- 设备连接 ----------
             if app is None:
@@ -164,61 +162,34 @@ class Worker(threading.Thread):
                 except Exception:
                     ver = "?"
                 self.emit("device", port=dev, version=ver)
-                state = S_IDLE
+                state = S_READY
+                presence = None
                 self.emit("state", state=state)
-                hits = misses = 0
+                time.sleep(SETTLE_S)    # 等供电稳定再恢复握手
                 continue
 
             try:
-                # ---------- 清场: 清掉脱机镜像, 主板自动机制静默 ----------
-                if clr_req:
-                    self.clr_img_req()
-                    try:
-                        m = app.info()
-                        if m["valid"]:
-                            app.img_clear()
-                            self.emit("log", text="已清除机内脱机镜像, "
-                                                  "主板自动烧录已静默 (联机模式)")
-                    except Exception as e:
-                        self.emit("log", text="清镜像失败: %s" % e)
-
-                # ---------- 空闲巡检: U 盘被拖入固件会复活自动烧录 ----------
-                if state in (S_IDLE, S_WAIT) and time.time() - last_patrol > PATROL_S:
+                # ---------- 巡检: 清掉脱机镜像, 防止主板自动烧录抢 SWD ----
+                if state != S_PROG and time.time() - last_patrol > PATROL_S:
                     last_patrol = time.time()
                     try:
                         m = app.info()
                         if m["valid"]:
                             app.img_clear()
-                            self.emit("log", text="检测到 U 盘/脱机镜像 (%d 字节), "
-                                                  "联机模式已自动清除" % m["length"])
+                            self.emit("log", text="已清除机内脱机镜像 (%d 字节), "
+                                                  "主板自动烧录保持静默" % m["length"])
                     except Exception:
                         pass
 
-                # ---------- 未启动 / 无固件 ----------
-                if not armed or fw is None:
-                    if state != S_IDLE:
-                        state = S_IDLE
-                        self.emit("state", state=state)
-                        hits = misses = 0
-                    time.sleep(0.2)
-                    continue
-
-                # ---------- 等目标插入 ----------
-                if state in (S_IDLE, S_WAIT):
-                    idcode = self.detect(app)
-                    if idcode is not None:
-                        hits += 1
-                        misses = 0
+                # ---------- 点击触发烧录 ----------
+                if burn and state != S_PROG:
+                    if fw is None:
+                        self.emit("log", text="尚未选择固件, 无法烧录")
+                    elif self.detect(app) is None:
+                        self.emit("log", text="未检测到目标板, 请接好后再点击")
                     else:
-                        hits = 0
-                        misses += 1
-                    if state != S_WAIT:
-                        state = S_WAIT
-                        self.emit("state", state=state)
-                    if hits >= HIT_NEED:
                         state = S_PROG
                         self.emit("state", state=state)
-                        self.emit("idcode", idcode=idcode)
                         self.emit("progress", done=0, total=len(fw[1]))
                         t0 = time.time()
                         code, done = self.program(app, fw[0], fw[1], fw[2])
@@ -234,43 +205,37 @@ class Worker(threading.Thread):
                             self.emit("result", ok=False, code=code,
                                       done=done, seconds=dt)
                             beep_fail()
-                        hits = misses = 0
-                    else:
-                        time.sleep(POLL_S)
                     continue
 
-                # ---------- 烧完(成/败): 等目标拔出 ----------
-                if state in (S_OK, S_FAIL):
+                # ---------- 空闲: 轮询目标是否就位 (仅显示, 不自动烧) ----
+                if state in (S_READY, S_OK, S_FAIL):
                     idcode = self.detect(app)
-                    if idcode is None:
-                        misses += 1
-                        hits = 0
-                    else:
-                        hits += 1
-                        misses = 0
-                    if misses >= MISS_NEED:
-                        state = S_WAIT
-                        hits = misses = 0
-                        self.emit("state", state=state)
-                        self.emit("progress", done=0, total=1)
-                    time.sleep(POLL_S)
-                    continue
+                    if idcode != presence:
+                        presence = idcode
+                        self.emit("presence", idcode=idcode)
+                time.sleep(POLL_S)
 
             except Exception as e:
-                # 串口断开/设备掉线: 若在烧录中计一次失败
+                # 串口断开/设备掉线 (如目标板接入瞬间拉垮供电)。
+                # 烧录中途掉线不算目标板失败: 不计数不报警, 重连后重新点击即可
                 if state == S_PROG:
-                    self.emit("result", ok=False, code=1, done=0, seconds=0)
-                    beep_fail()
-                self.emit("log", text="设备连接中断: %s" % e)
+                    self.emit("log", text="烧录中途 USB 掉线 (供电跌落?), "
+                                          "已自动重连, 请重新点击 [烧 录]")
+                    self.emit("state", state=S_FAIL)
+                    self.emit("result", ok=False, code=1, done=0,
+                              seconds=0, count=False)
+                else:
+                    self.emit("log", text="设备连接中断: %s" % e)
                 try:
                     app.close()
                 except Exception:
                     pass
                 app = None
                 state = S_NO_DEV
-                hits = misses = 0
+                presence = None
                 self.emit("state", state=state)
                 self.emit("device", port=None, version=None)
+                self.emit("presence", idcode=None)
                 time.sleep(RECONNECT_S)
 
         if app is not None:
@@ -289,7 +254,8 @@ class App(tk.Tk):
         self.worker = Worker(self.q)
         self.ok_cnt = 0
         self.fail_cnt = 0
-        self.armed = False
+        self.dev_online = False
+        self.burning = False
         self._build()
         self.worker.start()
         self.after(100, self._poll)
@@ -304,10 +270,6 @@ class App(tk.Tk):
         self.lb_dev = tk.Label(top, text="设备: 未连接 (等待插入 USB)", anchor="w",
                                fg="#a00000")
         self.lb_dev.pack(side="left", fill="x", expand=True)
-        self.btn_arm = tk.Button(top, text="开始烧录", width=12,
-                                 state="disabled", command=self._toggle_arm,
-                                 font=("Microsoft YaHei UI", 10, "bold"))
-        self.btn_arm.pack(side="right")
 
         fwf = tk.Frame(self)
         fwf.pack(fill="x", **pad)
@@ -328,13 +290,20 @@ class App(tk.Tk):
         right.pack(side="left", fill="both", expand=True)
         self.lb_state = tk.Label(right, text="未连接", anchor="w",
                                  font=("Microsoft YaHei UI", 13, "bold"))
-        self.lb_state.pack(fill="x", pady=(10, 2))
-        self.lb_chip = tk.Label(right, text="芯片: -", anchor="w", fg="#404040")
+        self.lb_state.pack(fill="x", pady=(4, 2))
+        self.lb_chip = tk.Label(right, text="目标板: 未检测到", anchor="w",
+                                fg="#404040")
         self.lb_chip.pack(fill="x")
         self.pb = ttk.Progressbar(right, length=340, mode="determinate")
-        self.pb.pack(fill="x", pady=(14, 2))
+        self.pb.pack(fill="x", pady=(10, 2))
         self.lb_prog = tk.Label(right, text="", anchor="w", fg="#404040")
         self.lb_prog.pack(fill="x")
+        self.btn_burn = tk.Button(right, text="烧  录", width=14,
+                                  state="disabled", command=self._burn,
+                                  font=("Microsoft YaHei UI", 12, "bold"),
+                                  bg="#2050a0", fg="white",
+                                  activebackground="#184080")
+        self.btn_burn.pack(anchor="e", pady=(8, 0))
 
         cnt = tk.Frame(self)
         cnt.pack(fill="x", **pad)
@@ -373,19 +342,15 @@ class App(tk.Tk):
                                % (os.path.basename(p), len(data), crc, load),
                           fg="#000000")
         self._log("已载入固件 %s (%d 字节)" % (os.path.basename(p), len(data)))
-        self._update_arm_btn()
+        self._update_burn_btn()
 
-    def _toggle_arm(self):
-        self.armed = not self.armed
-        self.worker.set_armed(self.armed)
-        self._update_arm_btn()
-        self._log("开始联机烧录" if self.armed else "已停止")
+    def _burn(self):
+        self.worker.request_burn()
 
-    def _update_arm_btn(self):
-        has_fw = self.worker.snapshot()[0] is not None
-        self.btn_arm.config(
-            state="normal" if has_fw else "disabled",
-            text="停止" if self.armed else "开始烧录")
+    def _update_burn_btn(self):
+        has_fw = self.worker.fw is not None
+        ok = has_fw and self.dev_online and not self.burning
+        self.btn_burn.config(state="normal" if ok else "disabled")
 
     def _clear_cnt(self):
         self.ok_cnt = self.fail_cnt = 0
@@ -411,17 +376,13 @@ class App(tk.Tk):
                 if kind == "state":
                     s = kw["state"]
                     self._set_led(s)
-                    self.lb_state.config(text={
-                        S_NO_DEV: "设备未连接",
-                        S_IDLE:   "已停止 / 待命",
-                        S_WAIT:   "等待目标板插入...",
-                        S_PROG:   "烧录中, 请勿拔线!",
-                        S_OK:     "烧录成功 ✓  (拔出目标板换下一块)",
-                        S_FAIL:   "烧录失败 ✗  (拔出目标板后重试)"}[s])
-                    if s == S_WAIT:
-                        self.lb_chip.config(text="芯片: -")
+                    self.lb_state.config(text=STATE_TXT[s])
+                    self.burning = (s == S_PROG)
+                    if s == S_PROG:
                         self.lb_prog.config(text="")
+                    self._update_burn_btn()
                 elif kind == "device":
+                    self.dev_online = bool(kw["port"])
                     if kw["port"]:
                         self.lb_dev.config(text="设备: %s 已连接  固件 %s"
                                            % (kw["port"], kw["version"]),
@@ -431,29 +392,32 @@ class App(tk.Tk):
                     else:
                         self.lb_dev.config(text="设备: 未连接 (等待插入 USB)",
                                            fg="#a00000")
+                    self._update_burn_btn()
+                elif kind == "presence":
+                    if kw["idcode"] is not None:
+                        self.lb_chip.config(text="目标板: 已就位  IDCODE=0x%08X"
+                                            % kw["idcode"], fg="#006000")
+                    else:
+                        self.lb_chip.config(text="目标板: 未检测到",
+                                            fg="#a06000")
+                elif kind == "chip":
+                    if kw["name"]:
+                        self.lb_chip.config(
+                            text=self.lb_chip.cget("text") + "  (%s)" % kw["name"])
+                        self._log("芯片识别: %s" % kw["name"])
                 elif kind == "progress":
                     done, total = kw["done"], kw["total"]
                     pct = (done * 100 // total) if total else 0
                     self.pb["value"] = pct
                     self.lb_prog.config(text="%d / %d 字节  (%d%%)"
                                         % (done, total, pct))
-                elif kind == "idcode":
-                    self.lb_chip.config(text="芯片: IDCODE=0x%08X"
-                                        % kw["idcode"])
-                    self._log("检测到目标板 IDCODE=0x%08X, 开始烧录"
-                              % kw["idcode"])
-                elif kind == "chip":
-                    if kw["name"]:
-                        cur = self.lb_chip.cget("text")
-                        self.lb_chip.config(text=cur + "  (%s)" % kw["name"])
-                        self._log("芯片识别: %s" % kw["name"])
                 elif kind == "result":
                     if kw["ok"]:
                         self.ok_cnt += 1
                         self.lb_ok.config(text="成功: %d" % self.ok_cnt)
                         self._log("烧录成功, 耗时 %.1fs, 累计成功 %d 块"
                                   % (kw["seconds"], self.ok_cnt))
-                    else:
+                    elif kw.get("count", True):
                         self.fail_cnt += 1
                         self.lb_fail.config(text="失败: %d" % self.fail_cnt)
                         self._log("烧录失败: code=%d(%s) 已写入 %d 字节"
