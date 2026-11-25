@@ -10,7 +10,8 @@
 #include "board.h"          /* TARGET_CHIP 选择 */
 #include "flash_blob.h"
 
-#if (TARGET_CHIP == TARGET_CHIP_STM32F1) || (TARGET_CHIP == TARGET_CHIP_GD32F103)
+#if (TARGET_CHIP == TARGET_CHIP_STM32F1) || (TARGET_CHIP == TARGET_CHIP_GD32F103) || \
+    (TARGET_CHIP == TARGET_CHIP_AUTO)
 
 static const uint32_t flash_code[] = {
     0xE00ABE00, 0x062D780D, 0x24084068, 0xD3000040, 0x1E644058, 0x1C49D1FA, 0x2A001E52, 0x4770D1F2,
@@ -48,7 +49,7 @@ const flash_algo_t FLASH_ALGO_STM32F1 = {
 
 #endif /* STM32F1 / GD32F103 */
 
-#if TARGET_CHIP == TARGET_CHIP_GD32F103
+#if (TARGET_CHIP == TARGET_CHIP_GD32F103) || (TARGET_CHIP == TARGET_CHIP_AUTO)
 /* GD32F103C8T6: 64KB, 1KB 页; FMC 与 STM32F1 兼容, 但页擦除更慢 */
 const flash_algo_t FLASH_ALGO_GD32F103 = {
     0x20000021u,  /* Init */

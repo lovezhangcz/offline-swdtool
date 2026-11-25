@@ -31,8 +31,11 @@
 /* ---- GD32 FMC 产品 ID ---- */
 #define FMC_PID        0x40022100u
 
-/* 按 board.h 的 TARGET_CHIP 选择烧录算法 */
-#if TARGET_CHIP == TARGET_CHIP_GD32F1X0
+/* 按 board.h 的 TARGET_CHIP 选择烧录算法 (AUTO 时由 target_id_check 运行期选定) */
+#if TARGET_CHIP == TARGET_CHIP_AUTO
+static const flash_algo_t *s_active_algo = &FLASH_ALGO_STM32F1;   /* 未识别前回退 */
+  #define ACTIVE_ALGO   (s_active_algo)
+#elif TARGET_CHIP == TARGET_CHIP_GD32F1X0
   #define ACTIVE_ALGO   (&FLASH_ALGO_GD32F1X0)
 #elif TARGET_CHIP == TARGET_CHIP_GD32F303
   #define ACTIVE_ALGO   (&FLASH_ALGO_GD32F303)
@@ -42,13 +45,50 @@
   #define ACTIVE_ALGO   (&FLASH_ALGO_STM32F1)
 #endif
 
-/* ---- 目标身份校验 (按 board.h 的 TARGET_CHIP 配置) ---- */
+/* ---- 目标身份校验 / 芯片识别 ---- */
 static uint8_t target_id_check(uint32_t idcode)
 {
     uint32_t dev = idcode & 0xFFFu;
     uint32_t rev = (idcode >> 16) & 0xFFFFu;
 
-#if TARGET_CHIP == TARGET_CHIP_GD32F103
+#if TARGET_CHIP == TARGET_CHIP_AUTO
+    /* DPIDR 版本字段在 bit31:28: 0x1=DPv1 (M3), 0x2=DPv2 (M4) */
+    uint32_t pid = 0;
+    uint8_t  is_m4 = ((g_status.target_dpidr >> 28) == 0x2u);
+    const char *name;
+
+    if (dev == 0x414u && is_m4) {                 /* GD32F303 */
+        s_active_algo = &FLASH_ALGO_GD32F303;
+        name = "GD32F303";
+    } else if (dev == 0x414u) {                   /* STM32F103 大容量 / GD32F103 HD */
+        s_active_algo = &FLASH_ALGO_STM32F1;
+        name = "STM32F1-HD";
+    } else if (dev == 0x410u) {
+        /* GD32F103 与 GD32F1x0 的 DEV_ID/REV_ID 完全相同 (0x410/0x1303),
+           只能靠 FMC_PID 区分 GD32 与 ST;
+           GD32 的 PID 高字节固定为 'A' (0x41):
+             GD32F103 : 0x41424333   GD32F130 : 0x41384330
+           两者 FMC 兼容、1KB 页, 共用 GD32F1x0 算法 (均已实测) */
+        (void)SWD_Mem_Read32(FMC_PID, &pid);
+        if ((pid >> 24) == 0x41u) {
+            s_active_algo = &FLASH_ALGO_GD32F1X0;
+            name = "GD32F10x/F1x0";
+        } else {                                  /* STM32F103 中容量 */
+            s_active_algo = &FLASH_ALGO_STM32F1;
+            name = "STM32F1";
+        }
+    } else if (dev == 0x412u || dev == 0x418u || dev == 0x420u ||
+               dev == 0x428u || dev == 0x430u) {  /* STM32F1 其它容量 */
+        s_active_algo = &FLASH_ALGO_STM32F1;
+        name = "STM32F1";
+    } else {
+        return TP_ERR_IDCODE;                     /* 未支持的芯片 */
+    }
+    Log_Str("CHIP "); Log_Str(name);
+    Log_Str(" PID="); Log_Hex(pid); Log_Str("\n");
+    (void)rev;
+    return TP_OK;
+#elif TARGET_CHIP == TARGET_CHIP_GD32F103
     /* GD32F103: DEV_ID 0x410 (与 STM32F103 中容量相同)。
        再用 FMC_PID 确认一次, 读到 0x41424333 可判定为 GD32;
        读不到也放行 (有些 GD32 掩码不同), 避免误拒。               */
@@ -80,6 +120,30 @@ static uint8_t target_id_check(uint32_t idcode)
 #endif
 }
 
+/* 连接 + 读 IDCODE + 身份校验
+   目标刚烧完/刚复位时, DP 能连但 AP 读会偶发失败, 整体重试 4 次 (间隔 100ms) */
+static uint8_t target_attach(void)
+{
+    uint32_t v;
+    uint8_t  r, i;
+
+    g_status.swd_err = 0;
+    for (i = 0; i < 4u; i++) {
+        r = SWD_Connect(&v);
+        g_status.swd_err = r;
+        if (r == SWD_OK) {
+            g_status.target_dpidr = v;
+            if (SWD_Mem_Read32(DBG_IDCODE, &v) == SWD_OK) {
+                g_status.target_idcode = v;
+                return target_id_check(v);
+            }
+        }
+        SWD_GPIO_Release();
+        if (i < 3u) BSP_DelayMs(100);
+    }
+    return TP_ERR_CONNECT;
+}
+
 /* 调一次烧录算法函数并解释结果 (FA_xxx -> TP_xxx) */
 static uint8_t algo_call(const flash_algo_t *algo, uint32_t entry,
                          uint32_t a1, uint32_t a2, uint32_t a3,
@@ -87,7 +151,10 @@ static uint8_t algo_call(const flash_algo_t *algo, uint32_t entry,
 {
     uint32_t ret = 0;
     uint8_t r = FlashAlgo_Call(algo, entry, a1, a2, a3, 0, timeout_ms, &ret);
-    if (r == FA_ERR_SWD)     return TP_ERR_CONNECT;
+    if (r == FA_ERR_SWD) {
+        Log_Str("ALG swd e="); Log_Hex(entry); Log_Str("\n");
+        return TP_ERR_CONNECT;
+    }
     if (r == FA_ERR_TIMEOUT || r == FA_ERR_RETVAL) {
         /* 调试线索: 哪一步、超时还是返回值非 0 */
         Log_Str("ALG e=");  Log_Hex(entry);
@@ -267,15 +334,8 @@ static uint8_t tp_run_impl(uint32_t *err_addr)
     }
 
     /* ---- 1. 连接并停机 ---- */
-    g_status.swd_err = 0;
-    r = SWD_Connect(&v);
-    g_status.swd_err = r;
-    if (r != SWD_OK) { SWD_GPIO_Release(); return TP_ERR_CONNECT; }
-    g_status.target_dpidr = v;
-
-    if (SWD_Mem_Read32(DBG_IDCODE, &v) != SWD_OK) return TP_ERR_CONNECT;
-    g_status.target_idcode = v;
-    if (target_id_check(v) != TP_OK) return TP_ERR_IDCODE;
+    r = target_attach();
+    if (r != TP_OK) { SWD_GPIO_Release(); return r; }
 
     /* 冻结看门狗, 停机 */
     if (SWD_Mem_Read32(DBG_CR, &v) == SWD_OK)
@@ -389,6 +449,7 @@ static uint8_t tp_run_impl(uint32_t *err_addr)
     (void)SWD_Mem_Write32(DHCSR, 0xA05F0000u);   /* 解除停机 */
     (void)SWD_Mem_Write32(AIRCR, 0x05FA0004u);   /* SYSRESETREQ */
     BSP_DelayMs(50);
+    SWD_GPIO_Release();                          /* 释放 SWD 引脚, 便于下一次连接 */
 
     return TP_OK;
 }
@@ -488,15 +549,9 @@ uint8_t TargetStream_Begin(uint32_t total_len, uint32_t crc32,
         return TP_ERR_PARAM;
 
     /* ---- 连接 + 停机 ---- */
-    g_status.swd_err = 0;
-    r = SWD_Connect(&v);
-    g_status.swd_err = r;
-    if (r != SWD_OK) { SWD_GPIO_Release(); return TP_ERR_CONNECT; }
-    g_status.target_dpidr = v;
-
-    if (SWD_Mem_Read32(DBG_IDCODE, &v) != SWD_OK) return TP_ERR_CONNECT;
-    g_status.target_idcode = v;
-    if (target_id_check(v) != TP_OK) { SWD_GPIO_Release(); return TP_ERR_IDCODE; }
+    r = target_attach();
+    if (r != TP_OK) { SWD_GPIO_Release(); return r; }
+    algo = ACTIVE_ALGO;                 /* AUTO: 识别后取对应算法 */
 
     if (SWD_Mem_Read32(DBG_CR, &v) == SWD_OK)
         (void)SWD_Mem_Write32(DBG_CR, v | DBG_IWDG_STOP | DBG_WWDG_STOP);
@@ -652,6 +707,19 @@ uint8_t TargetStream_End(uint32_t *err_addr)
     return TP_OK;
 }
 
+/* 擦除后的回读: 整片擦除期间 Flash 控制器长时间忙, 之后 AP 读会短暂失败,
+   延时 50ms 并重新连接后再读 (F303 512KB 实测需要) */
+static uint8_t flash_read_retry(uint32_t addr, uint32_t *val)
+{
+    uint8_t i;
+    for (i = 0; i < 5u; i++) {
+        if (SWD_Mem_Read32(addr, val) == SWD_OK) return TP_OK;
+        BSP_DelayMs(50);
+        (void)target_attach();
+    }
+    return TP_ERR_CONNECT;
+}
+
 /* ---------------- 整片擦除 ---------------- */
 uint8_t TargetEraseChip(void)
 {
@@ -662,21 +730,14 @@ uint8_t TargetEraseChip(void)
     g_target_flash_kb = 0;
     g_status.swd_err = 0;
 
-    r = SWD_Connect(&v);
-    g_status.swd_err = r;
-    if (r != SWD_OK) { SWD_GPIO_Release(); return TP_ERR_CONNECT; }
-    g_status.target_dpidr = v;
-
-    if (SWD_Mem_Read32(DBG_IDCODE, &v) != SWD_OK) {
-        SWD_GPIO_Release();
-        return TP_ERR_CONNECT;
-    }
-    g_status.target_idcode = v;
-    if (target_id_check(v) != TP_OK) { SWD_GPIO_Release(); return TP_ERR_IDCODE; }
+    r = target_attach();
+    if (r != TP_OK) { Log_Str("EA attach fail\n"); SWD_GPIO_Release(); return r; }
+    algo = ACTIVE_ALGO;                 /* AUTO: 识别后取对应算法 */
 
     if (SWD_Mem_Read32(DBG_CR, &v) == SWD_OK)
         (void)SWD_Mem_Write32(DBG_CR, v | DBG_IWDG_STOP | DBG_WWDG_STOP);
     if (SWD_Mem_Write32(DHCSR, 0xA05F0003u) != SWD_OK) {
+        Log_Str("EA halt fail\n");
         SWD_GPIO_Release();
         return TP_ERR_HALT;
     }
@@ -687,10 +748,16 @@ uint8_t TargetEraseChip(void)
         if (g_target_flash_kb > 4096u) g_target_flash_kb = 0;
     }
 
-    if (FlashAlgo_Load(algo) != FA_OK) { strm_reset_run(); return TP_ERR_CONNECT; }
+    if (FlashAlgo_Load(algo) != FA_OK) {
+        Log_Str("EA load fail\n");
+        strm_reset_run(); return TP_ERR_CONNECT;
+    }
     r = algo_call(algo, algo->init, 0x08000000u, 0, 1,
                   algo->prog_timeout_ms + 500u, TP_ERR_ALGO);
-    if (r != TP_OK) { strm_reset_run(); return r; }
+    if (r != TP_OK) {
+        Log_Str("EA init fail\n");
+        strm_reset_run(); return r;
+    }
 
     if (algo->erase_chip != 0xFFFFFFFFu) {
         r = algo_call(algo, algo->erase_chip, 0, 0, 0,
@@ -710,17 +777,20 @@ uint8_t TargetEraseChip(void)
 
     /* 空白校验: 首字与末字都应是 0xFFFFFFFF */
     if (r == TP_OK) {
-        uint32_t w0, w1;
-        if (SWD_Mem_Read32(0x08000000u, &w0) != SWD_OK) {
-            r = TP_ERR_CONNECT;
-        } else if (w0 != 0xFFFFFFFFu) {
+        uint32_t w0 = 0, w1 = 0;
+        r = flash_read_retry(0x08000000u, &w0);
+        if (r == TP_OK && w0 != 0xFFFFFFFFu) {
+            Log_Str("EA w0="); Log_Hex(w0); Log_Str("\n");
             r = TP_ERR_ERASE;
-        } else if (g_target_flash_kb != 0) {
-            if (SWD_Mem_Read32(0x08000000u + g_target_flash_kb * 1024u - 4u, &w1) != SWD_OK)
-                r = TP_ERR_CONNECT;
-            else if (w1 != 0xFFFFFFFFu)
-                r = TP_ERR_ERASE;
         }
+        if (r == TP_OK && g_target_flash_kb != 0) {
+            r = flash_read_retry(0x08000000u + g_target_flash_kb * 1024u - 4u, &w1);
+            if (r == TP_OK && w1 != 0xFFFFFFFFu) {
+                Log_Str("EA w1="); Log_Hex(w1); Log_Str("\n");
+                r = TP_ERR_ERASE;
+            }
+        }
+        if (r != TP_OK) Log_Str("EA verify fail\n");
     }
 
     strm_reset_run();

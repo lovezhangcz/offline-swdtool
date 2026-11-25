@@ -9,7 +9,7 @@
 #include "board.h"          /* TARGET_CHIP 选择 */
 #include "flash_blob.h"
 
-#if TARGET_CHIP == TARGET_CHIP_GD32F1X0
+#if (TARGET_CHIP == TARGET_CHIP_GD32F1X0) || (TARGET_CHIP == TARGET_CHIP_AUTO)
 
 static const uint32_t flash_code[] = {
     0xE00ABE00, 0x062D780D, 0x24084068, 0xD3000040, 0x1E644058, 0x1C49D1FA, 0x2A001E52, 0x4770D1F2,

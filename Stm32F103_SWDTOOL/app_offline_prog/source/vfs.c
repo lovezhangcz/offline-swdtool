@@ -572,6 +572,7 @@ static void parse_rootdir_for_fw(const uint8_t *rootdir)
     uint8_t i;
 
     memset(lfn_buf, 0, sizeof(lfn_buf));
+    g_fw_found = 0;
 
     for (i = 0; i < VFS_ROOT_ENTRIES; i++) {
         const uint8_t *entry = rootdir + i * 32;
@@ -608,40 +609,47 @@ static void parse_rootdir_for_fw(const uint8_t *rootdir)
 
         if (is_user_file_entry(entry)) {
             if (is_bin_extension(entry)) {
-                /* 找到第一个 .bin 文件 */
+                /* 目录里可能有多个 .bin (旧镜像残留/重复拖入),
+                 * 取首簇号最大者, 即最近一次写入的文件 */
+                uint8_t  name_tmp[FW_NAME_LEN];
+                uint32_t size;
+                uint16_t fc;
 
+                memset(name_tmp, 0, sizeof(name_tmp));
                 if (lfn_ok && lfn_len > 0) {
-                    memcpy(g_fw_name, lfn_buf, lfn_len);
-                    if (lfn_len < FW_NAME_LEN) g_fw_name[lfn_len] = 0;
+                    memcpy(name_tmp, lfn_buf, lfn_len);
                 } else {
                     /* 没有 LFN, 从短名构造 */
                     uint8_t j;
                     uint8_t pos = 0;
-                    for (j = 0; j < 8 && pos < FW_NAME_LEN; j++) {
+                    for (j = 0; j < 8 && pos < FW_NAME_LEN - 1u; j++) {
                         if (entry[j] == ' ') break;
-                        g_fw_name[pos++] = entry[j];
+                        name_tmp[pos++] = entry[j];
                     }
-                    if (entry[8] != ' ' && pos + 1 < FW_NAME_LEN) {
-                        g_fw_name[pos++] = '.';
-                        for (j = 8; j < 11 && pos < FW_NAME_LEN; j++) {
+                    if (entry[8] != ' ' && pos + 1u < FW_NAME_LEN) {
+                        name_tmp[pos++] = '.';
+                        for (j = 8; j < 11 && pos < FW_NAME_LEN - 1u; j++) {
                             if (entry[j] == ' ') break;
-                            g_fw_name[pos++] = entry[j];
+                            name_tmp[pos++] = entry[j];
                         }
                     }
-                    if (pos < FW_NAME_LEN) g_fw_name[pos] = 0;
                 }
 
                 /* 文件大小 */
-                g_fw_size = (uint32_t)entry[28]
-                          | ((uint32_t)entry[29] << 8)
-                          | ((uint32_t)entry[30] << 16)
-                          | ((uint32_t)entry[31] << 24);
+                size = (uint32_t)entry[28]
+                     | ((uint32_t)entry[29] << 8)
+                     | ((uint32_t)entry[30] << 16)
+                     | ((uint32_t)entry[31] << 24);
 
                 /* 首簇号 */
-                g_fw_first_cluster = (uint16_t)entry[26] | ((uint16_t)entry[27] << 8);
+                fc = (uint16_t)entry[26] | ((uint16_t)entry[27] << 8);
 
-                g_fw_found = 1;
-                return;  /* 第一个为准 */
+                if (!g_fw_found || fc > g_fw_first_cluster) {
+                    memcpy(g_fw_name, name_tmp, FW_NAME_LEN);
+                    g_fw_size = size;
+                    g_fw_first_cluster = fc;
+                    g_fw_found = 1;
+                }
             }
         }
         /* 非目标文件项 (含卷标等): LFN 必须紧邻其短目录项, 断开即作废 */

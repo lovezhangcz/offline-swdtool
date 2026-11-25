@@ -108,23 +108,32 @@
 #endif
 
 /* ------------------------------------------------------- 目标芯片选择 ---- */
-/* TARGET_CHIP_STM32F1  : STM32F101/103 系列 (DEV_ID 0x410/412/414/418/430..)
- * TARGET_CHIP_GD32F1X0 : GD32F130/150 (GD32F1x0 系列, Cortex-M4)
- *   GD32F1x0 与 STM32F1 共用 DEV_ID 0x410, FMC 寄存器/密钥/位定义兼容,
- *   仅 REV_ID 不同 (0x1303); 选择后按对应规则校验目标身份。
- * TARGET_CHIP_GD32F103 : GD32F103 系列 (Cortex-M3, 如 GD32F103C8T6)
- *   DEV_ID 0x410 与 STM32F103 中容量相同; FMC 寄存器布局/解锁密钥与
- *   STM32F1 一致, 但擦除更慢 (1KB 页, 擦除超时放宽), 且 FMC_PID
- *   (0x40022100) 读出 0x41424333 可确认为 GD32。
- * TARGET_CHIP_GD32F303 : GD32F303 系列 (Cortex-M4, DEV_ID 0x414, REV 0x2104)
+/* TARGET_CHIP_AUTO     : 自动识别 (默认)
+ *   运行期按 SWD DPIDR + DBGMCU IDCODE (+ FMC_PID) 判定芯片, 并选用对应
+ *   烧录算法; 四个算法 blob 全部编入 (约 +1KB Flash)。
+ *   已实测通过的特征:
+ *     GD32F303 : DPIDR 0x2BA01477 (M4)  DEV 0x414  REV 0x2104  2KB 扇区/512KB
+ *     GD32 1KB : DPIDR 0x1BA01477 (M3)  DEV 0x410  PID 高字节 0x41
+ *                GD32F103 与 GD32F1x0 的 DEV/REV 完全相同 (0x410/0x1303),
+ *                只能靠 FMC_PID 区分 (GD32F103=0x41424333, GD32F130=0x41384330);
+ *                两者共用 GD32F1x0 算法 (均已实测)
+ *     STM32F1  : DPIDR 0x1BA01477 (M3)  DEV 0x410/412/414/418/420/428/430
+ *                (DEV 0x410 且 FMC_PID 读不到 0x41424333 时判为 STM32F1)
+ * TARGET_CHIP_STM32F1  : 仅 STM32F101/103 系列
+ * TARGET_CHIP_GD32F1X0 : 仅 GD32F1x0 (GD32F130/150, 1KB 页)
+ *   GD32F1x0 与 STM32F1 共用 DEV_ID 0x410, FMC 寄存器/密钥/位定义兼容;
+ *   GD32F103 的 DEV_ID/REV_ID 也一样, 只能读 FMC_PID 区分。
+ * TARGET_CHIP_GD32F103 : 仅 GD32F103 系列 (Cortex-M3, 如 GD32F103C8T6)
+ * TARGET_CHIP_GD32F303 : 仅 GD32F303 系列 (Cortex-M4, DEV_ID 0x414)
  *   FMC 与 F1 兼容, 扇区 2KB (编程页 1KB), 512KB 版本用 GD32F30x_HD.FLM。 */
+#define TARGET_CHIP_AUTO        0
 #define TARGET_CHIP_STM32F1     1
 #define TARGET_CHIP_GD32F1X0    2
 #define TARGET_CHIP_GD32F103    3
 #define TARGET_CHIP_GD32F303    4
 
 #ifndef TARGET_CHIP
-#define TARGET_CHIP             TARGET_CHIP_GD32F303   /* 当前目标: GD32F303 */
+#define TARGET_CHIP             TARGET_CHIP_AUTO   /* 当前: 自动识别 */
 #endif
 
 /* ---------------------------------------------------------------- SWD ---- */

@@ -600,32 +600,28 @@ uint32_t SWD_ListenRaw(uint8_t mode)
 /* ------------------------------------------------ 连接 ------------------- */
 uint8_t SWD_Connect(uint32_t *dpidr)
 {
-    uint8_t  r;
+    uint8_t  r, attempt;
     uint32_t v, to;
 
     s_sel_cache = 0xFFFFFFFFu;
     s_csw_cache = 0xFFFFFFFFu;
     SWD_GPIO_Init();
 
-    /* JTAG -> SWD 切换序列 (对齐成功参考实现: 80拍 / 0xE79E / 60拍 / 16拍空闲) */
-    swd_line_reset(80u);
-    swdio_out();
-    swd_write_bits(0xE79Eu, 16);
-    swd_line_reset(60u);
-    swd_idle();
-
-    /* 参考实现: 切换后第一个事务直接读 DPIDR (失败则整序列重试一次) */
-    r = SWD_DP_Read(0x0u, &v);
-    if (r != SWD_OK) {
+    /* JTAG -> SWD 切换序列 (对齐成功参考实现: 80拍 / 0xE79E / 60拍 / 16拍空闲)
+       目标刚复位/刚烧完时 SWD 可能尚未就绪, 整条序列最多试 8 轮, 间隔 20ms */
+    for (attempt = 0; attempt < 8u; attempt++) {
         swd_line_reset(80u);
         swdio_out();
         swd_write_bits(0xE79Eu, 16);
         swd_line_reset(60u);
         swd_idle();
+
         r = SWD_DP_Read(0x0u, &v);
-        if (r != SWD_OK) return r;
+        if (r == SWD_OK && (v & 0x0FFFFFFFu) == 0x0BA01477u) break;  /* M3/M4 DP */
+        if (attempt < 7u) BSP_DelayMs(20);
     }
-    if ((v & 0x0FFFFFFFu) != 0x0BA01477u) {      /* Cortex-M3 DP (掩掉 Revision) */
+    if (r != SWD_OK) return r;
+    if ((v & 0x0FFFFFFFu) != 0x0BA01477u) {      /* 掩掉 Revision, M0 等其它 DP 拒绝 */
         *dpidr = v;
         return SWD_ERR_IDCODE;
     }
