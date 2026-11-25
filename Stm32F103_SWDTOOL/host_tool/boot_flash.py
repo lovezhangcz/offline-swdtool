@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 USB 调试闭环工具: 通过 boot 升级应用 + 抓诊断日志
@@ -74,6 +74,7 @@ CMD_STRM_BEGIN = 0x30
 CMD_STRM_DATA = 0x31
 CMD_STRM_END = 0x32
 CMD_TGT_ERASE = 0x33
+CMD_TGT_READ = 0x34
 
 TGT_LOAD_ADDR = 0x08000000       # 目标芯片烧录起始地址
 TGT_CHUNK = 508                  # IMG_DATA 单包最大数据量
@@ -316,6 +317,21 @@ class AppLink:
         if st != 0 or len(pl) < 5:
             raise RuntimeError("TGT_ERASE 失败 status=%d" % st)
         return dict(status=pl[0], flash_kb=struct.unpack("<I", pl[1:5])[0])
+
+    def tgt_read(self, addr, length, timeout=8.0):
+        """诊断: 直接读目标存储器 (每次 <=48 字节, 内部循环), 返回 bytes"""
+        out = bytearray()
+        while length > 0:
+            n = min(48, length)
+            n &= ~3                      # 4 字节对齐
+            st, pl = self.cmd(CMD_TGT_READ, struct.pack("<II", addr, n),
+                              timeout=timeout)
+            if st != 0:
+                raise RuntimeError("TGT_READ @0x%08X 失败 status=%d" % (addr, st))
+            out += pl
+            addr += n
+            length -= n
+        return bytes(out)
 
     def flash_test(self, timeout=10.0):
         """本机 Flash 实际容量自检: 芯片自报 KB + 64KB/128KB 之上页的擦写结果"""
@@ -1099,6 +1115,29 @@ def main():
 
     if cmd == "erase":
         return do_erase(dev)
+
+    if cmd == "read":
+        # read <addr> <len>: 诊断, 直接读目标存储器并 hexdump
+        if len(args) < 3:
+            print("用法: python boot_flash.py read <addr> <len>")
+            return 1
+        addr = int(args[1], 0)
+        n = int(args[2], 0)
+        app = try_app(dev, 1.5)
+        if app is None:
+            print("设备不在应用模式, 先执行: python boot_flash.py run")
+            return 3
+        try:
+            data = app.tgt_read(addr, n)
+        finally:
+            app.close()
+        for off in range(0, len(data), 16):
+            row = data[off:off + 16]
+            print("0x%08X  %-47s  %s" % (
+                addr + off,
+                " ".join("%02X" % b for b in row),
+                "".join(chr(b) if 32 <= b < 127 else "." for b in row)))
+        return 0
 
     if cmd == "fsize":
         return do_fsize(dev)

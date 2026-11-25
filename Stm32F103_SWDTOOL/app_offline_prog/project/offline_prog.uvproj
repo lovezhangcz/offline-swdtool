@@ -483,6 +483,11 @@
               <FilePath>..\source\flash_algo_gd32f303.c</FilePath>
             </File>
             <File>
+              <FileName>flash_algo_apm32f40x.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\source\flash_algo_apm32f40x.c</FilePath>
+            </File>
+            <File>
               <FileName>flash_algo_stm32f1.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\source\flash_algo_stm32f1.c</FilePath>
@@ -1023,6 +1028,11 @@
               <FilePath>..\source\flash_algo_gd32f303.c</FilePath>
             </File>
             <File>
+              <FileName>flash_algo_apm32f40x.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\source\flash_algo_apm32f40x.c</FilePath>
+            </File>
+            <File>
               <FileName>flash_algo_stm32f1.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\source\flash_algo_stm32f1.c</FilePath>
@@ -1561,6 +1571,11 @@
               <FileName>flash_algo_gd32f303.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\source\flash_algo_gd32f303.c</FilePath>
+            </File>
+            <File>
+              <FileName>flash_algo_apm32f40x.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\source\flash_algo_apm32f40x.c</FilePath>
             </File>
             <File>
               <FileName>flash_algo_stm32f1.c</FileName>
