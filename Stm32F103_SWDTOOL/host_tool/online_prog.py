@@ -99,31 +99,47 @@ class Worker(threading.Thread):
         except Exception:
             return None
 
-    # ---- 烧录一整块目标 ----
+    # ---- 烧录一整块目标 (失败自动重试 1 次: 目标刚上电的首次会话偶发
+    #      擦除超时, 实测第二次即成功; 重试对产线更友好) ----
     def program(self, app, load, data, crc):
-        r = app.strm_begin(len(data), crc, load)
-        if r["status"] != 0:
-            return r["status"], 0
-        chip = ""
-        try:
-            for ln in app.logs().splitlines():
-                if ln.startswith("CHIP "):
-                    chip = ln[5:].split(" PID=")[0]
-        except Exception:
-            pass
-        self.emit("chip", name=chip)
-        off = 0
-        while off < len(data):
-            chunk = data[off:off + bf.TGT_CHUNK]
-            got = app.strm_data(off, chunk)
-            if got["status"] != 0:
-                return got["status"], off
-            off += len(chunk)
-            self.emit("progress", done=off, total=len(data))
-            if self.stop_evt.is_set():
-                return 12, off
-        r = app.strm_end()
-        return r["status"], len(data)
+        last = (12, 0)
+        chip_emitted = False
+        for attempt in (1, 2):
+            if attempt > 1:
+                self.emit("log", text="首次烧录未成功, 自动重试 1 次 ...")
+                time.sleep(0.3)
+            r = app.strm_begin(len(data), crc, load)
+            if r["status"] != 0:
+                last = (r["status"], 0)
+                continue
+            if not chip_emitted:
+                chip_emitted = True
+                chip = ""
+                try:
+                    for ln in app.logs().splitlines():
+                        if ln.startswith("CHIP "):
+                            chip = ln[5:].split(" PID=")[0]
+                except Exception:
+                    pass
+                self.emit("chip", name=chip)
+            off = 0
+            while off < len(data):
+                chunk = data[off:off + bf.TGT_CHUNK]
+                got = app.strm_data(off, chunk)
+                if got["status"] != 0:
+                    break
+                off += len(chunk)
+                self.emit("progress", done=off, total=len(data))
+                if self.stop_evt.is_set():
+                    return 12, off
+            else:
+                r = app.strm_end()
+                last = (r["status"], len(data))
+                if last[0] == 0:
+                    return last
+                continue
+            last = (got["status"], off)      # strm_data 失败
+        return last
 
     def run(self):
         app = None
