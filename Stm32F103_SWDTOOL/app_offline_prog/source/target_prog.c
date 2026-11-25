@@ -3,6 +3,7 @@
   * @file  target_prog.c
   * @brief 目标烧录实现 (Keil FLM 算法 + SWD)
   */
+#include <string.h>
 #include "target_prog.h"
 #include "swd_host.h"
 #include "flash_algo.h"
@@ -179,13 +180,35 @@ uint8_t TargetProg_Probe(uint32_t *dpidr, uint32_t *idcode)
     if (r == SWD_OK) {
         if (SWD_Mem_Read32(DBG_IDCODE, idcode) == SWD_OK)
             g_status.target_idcode = *idcode;
+        {
+            uint32_t dh = 0;
+            if (SWD_Mem_Read32(0xE000EDF0u, &dh) == SWD_OK) {
+                Log_Str("DHCSR=");
+                Log_Hex(dh);
+                Log_Str("\n");
+            }
+        }
+        {
+            /* 目标是否在跑: 间隔 300ms 采样 GPIOA/B/C 的 ODR, 有变化即说明代码在动 */
+            uint32_t o1[3], o2[3];
+            uint8_t  i;
+            for (i = 0; i < 3u; i++)
+                (void)SWD_Mem_Read32(0x4001080Cu + (uint32_t)i * 0x400u, &o1[i]);
+            BSP_DelayMs(300);
+            for (i = 0; i < 3u; i++)
+                (void)SWD_Mem_Read32(0x4001080Cu + (uint32_t)i * 0x400u, &o2[i]);
+            Log_Str("ODR1="); Log_Hex(o1[2]); Log_Hex(o1[1]); Log_Hex(o1[0]);
+            Log_Str(" ODR2="); Log_Hex(o2[2]); Log_Hex(o2[1]); Log_Hex(o2[0]);
+            Log_Str((o1[0] != o2[0] || o1[1] != o2[1] || o1[2] != o2[2]) ?
+                    " RUN\n" : " STATIC\n");
+        }
         SWD_ReleaseNRST();
     }
     SWD_GPIO_Release();
     return r;
 }
 
-uint8_t TargetProg_Run(uint32_t *err_addr)
+static uint8_t tp_run_impl(uint32_t *err_addr)
 {
     const img_hdr_t *h = Storage_Header();
     uint32_t addr, len, load;
@@ -195,9 +218,27 @@ uint8_t TargetProg_Run(uint32_t *err_addr)
 
     if (err_addr) *err_addr = 0;
     if (!Storage_ImageValid()) return TP_ERR_NOIMAGE;
-
     load = h->load_addr;
     len  = h->length;
+
+    /* 防止把 Intel HEX 文本当成固件烧进去 (例如直接拖 .hex 进 U 盘) */
+    {
+        const uint8_t *p = Storage_PayloadPtr();
+        if (len >= 8u && p[0] == (uint8_t)':') {
+            uint32_t i;
+            uint8_t is_txt = 1;
+            for (i = 1; i < len && i < 256u; i++) {
+                uint8_t c = p[i];
+                if (c == '\r' || c == '\n') break;
+                if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') ||
+                      (c >= 'a' && c <= 'f'))) { is_txt = 0; break; }
+            }
+            if (is_txt) {
+                Log_Str("IMG IS HEX TEXT\n");
+                return TP_ERR_HEX;
+            }
+        }
+    }
 
     /* ---- 1. 连接并停机 ---- */
     g_status.swd_err = 0;
@@ -324,5 +365,339 @@ uint8_t TargetProg_Run(uint32_t *err_addr)
     BSP_DelayMs(50);
 
     return TP_OK;
+}
+
+uint8_t TargetProg_Run(uint32_t *err_addr)
+{
+    uint8_t r = tp_run_impl(err_addr);
+
+    /* 失败时别把目标丢在停机态, 否则看起来像"芯片没运行": 复位让它重新跑(旧)固件 */
+    if (r != TP_OK && r != TP_ERR_CONNECT && r != TP_ERR_NOIMAGE && r != TP_ERR_HEX) {
+        (void)SWD_Mem_Write32(DHCSR, 0xA05F0000u);
+        (void)SWD_Mem_Write32(AIRCR, 0x05FA0004u);
+        BSP_DelayMs(20);
+    }
+    return r;
+}
+
+/* ================================================================
+ *                        流式烧录
+ * ================================================================ */
+
+/* 目标 Flash 容量寄存器 (单位 KB) */
+#define FLASH_SIZE_REG   0x1FFFF7E0u
+
+uint32_t g_target_flash_kb;
+
+static struct {
+    uint8_t  active;
+    uint32_t load;
+    uint32_t len;
+    uint32_t crc;           /* 期望的载荷 CRC32 */
+    uint32_t received;
+    uint32_t page_size;     /* 每页编程字节数 (= program_buffer_size) */
+    uint32_t page_off;
+    uint32_t addr;          /* 当前页起始地址 */
+    uint8_t  page_buf[1024];
+} s_strm;
+
+/* 把 page_buf 里的一整页写进目标 Flash */
+static uint8_t strm_program_page(void)
+{
+    const flash_algo_t *algo = ACTIVE_ALGO;
+    uint32_t sent = 0;
+    uint8_t  r;
+
+    while (sent < s_strm.page_size) {
+        uint32_t wbuf[8];
+        uint32_t n  = (s_strm.page_size - sent > sizeof(wbuf))
+                      ? (uint32_t)sizeof(wbuf) : (s_strm.page_size - sent);
+        uint32_t nw = (n + 3u) / 4u;
+        uint32_t i;
+
+        for (i = 0; i < nw; i++) {
+            uint32_t off = sent + i * 4u;
+            uint32_t w = 0xFFFFFFFFu;
+            uint32_t b;
+            for (b = 0; b < 4u && off + b < s_strm.page_size; b++)
+                ((uint8_t *)&w)[b] = s_strm.page_buf[off + b];
+            wbuf[i] = w;
+        }
+        if (SWD_Mem_WriteBlock(algo->program_buffer + sent, wbuf, nw) != SWD_OK)
+            return TP_ERR_CONNECT;
+        sent += n;
+    }
+
+    r = algo_call(algo, algo->program_page, s_strm.addr, s_strm.page_size,
+                  algo->program_buffer, algo->prog_timeout_ms + 500u, TP_ERR_WRITE);
+    if (r != TP_OK) return r;
+
+    s_strm.addr    += s_strm.page_size;
+    s_strm.page_off = 0;
+    return TP_OK;
+}
+
+/* 结束时无论成败都让目标跑起来 (成功=跑新固件, 失败=跑原有内容) */
+static void strm_reset_run(void)
+{
+    (void)SWD_Mem_Write32(DHCSR, 0xA05F0000u);   /* 解除停机 */
+    (void)SWD_Mem_Write32(AIRCR, 0x05FA0004u); /* SYSRESETREQ */
+    BSP_DelayMs(50);
+    SWD_GPIO_Release();
+}
+
+uint8_t TargetStream_Begin(uint32_t total_len, uint32_t crc32,
+                           uint32_t load_addr, uint32_t *err_addr)
+{
+    const flash_algo_t *algo = ACTIVE_ALGO;
+    uint32_t v;
+    uint8_t  r;
+
+    if (err_addr) *err_addr = 0;
+    s_strm.active = 0;
+    g_target_flash_kb = 0;
+
+    if (total_len == 0 || (load_addr & 0xFF000000u) != 0x08000000u ||
+        (load_addr & 3u) != 0u)
+        return TP_ERR_PARAM;
+
+    /* ---- 连接 + 停机 ---- */
+    g_status.swd_err = 0;
+    r = SWD_Connect(&v);
+    g_status.swd_err = r;
+    if (r != SWD_OK) { SWD_GPIO_Release(); return TP_ERR_CONNECT; }
+    g_status.target_dpidr = v;
+
+    if (SWD_Mem_Read32(DBG_IDCODE, &v) != SWD_OK) return TP_ERR_CONNECT;
+    g_status.target_idcode = v;
+    if (target_id_check(v) != TP_OK) { SWD_GPIO_Release(); return TP_ERR_IDCODE; }
+
+    if (SWD_Mem_Read32(DBG_CR, &v) == SWD_OK)
+        (void)SWD_Mem_Write32(DBG_CR, v | DBG_IWDG_STOP | DBG_WWDG_STOP);
+    if (SWD_Mem_Write32(DHCSR, 0xA05F0003u) != SWD_OK)
+        return TP_ERR_HALT;
+    SWD_ReleaseNRST();
+
+    /* ---- 容量检查: 读目标 Flash 大小 (KB) ---- */
+    if (SWD_Mem_Read32(FLASH_SIZE_REG, &v) == SWD_OK) {
+        g_target_flash_kb = v & 0xFFFFu;
+        if (g_target_flash_kb > 4096u) g_target_flash_kb = 0;   /* 明显无效 */
+    }
+    if (g_target_flash_kb != 0 &&
+        (load_addr - 0x08000000u) + total_len > g_target_flash_kb * 1024u) {
+        strm_reset_run();           /* 目标保持原状继续运行 */
+        return TP_ERR_SIZE;
+    }
+
+    /* ---- 下载算法 + 初始化 + 擦除 ---- */
+    if (FlashAlgo_Load(algo) != FA_OK) { strm_reset_run(); return TP_ERR_CONNECT; }
+    if (algo->program_buffer_size > sizeof(s_strm.page_buf)) {
+        strm_reset_run();
+        return TP_ERR_ALGO;
+    }
+
+    r = algo_call(algo, algo->init, load_addr, 0, 1,
+                  algo->prog_timeout_ms + 500u, TP_ERR_ALGO);
+    if (r != TP_OK) { strm_reset_run(); return r; }
+
+    if (algo->erase_chip != 0xFFFFFFFFu) {
+        r = algo_call(algo, algo->erase_chip, 0, 0, 0,
+                      algo->erase_timeout_ms + 2000u, TP_ERR_ERASE);
+    } else {
+        uint32_t sec;
+        r = TP_OK;
+        for (sec = load_addr & ~(algo->sector_size - 1u);
+             sec < load_addr + total_len && r == TP_OK;
+             sec += algo->sector_size) {
+            r = algo_call(algo, algo->erase_sector, sec, 0, 0,
+                          algo->erase_timeout_ms + 500u, TP_ERR_ERASE);
+        }
+    }
+    if (r != TP_OK) { strm_reset_run(); return r; }
+
+    /* ---- 就绪 ---- */
+    s_strm.load      = load_addr;
+    s_strm.len       = total_len;
+    s_strm.crc       = crc32;
+    s_strm.received  = 0;
+    s_strm.page_size = algo->program_buffer_size;
+    s_strm.page_off  = 0;
+    s_strm.addr      = load_addr;
+    s_strm.active    = 1;
+    g_status.progress = 0;
+    return TP_OK;
+}
+
+uint8_t TargetStream_Data(uint32_t offset, const uint8_t *data,
+                          uint16_t len, uint32_t *err_addr)
+{
+    if (err_addr) *err_addr = 0;
+    if (!s_strm.active) return TP_ERR_PARAM;
+    if (offset != s_strm.received || offset + len > s_strm.len) return TP_ERR_PARAM;
+
+    while (len != 0) {
+        uint32_t space = s_strm.page_size - s_strm.page_off;
+        uint32_t n = (len < space) ? (uint32_t)len : space;
+
+        memcpy(&s_strm.page_buf[s_strm.page_off], data, n);
+        s_strm.page_off += n;
+        data += n;
+        len  = (uint16_t)(len - n);
+        s_strm.received += n;
+
+        if (s_strm.page_off == s_strm.page_size) {
+            uint8_t r = strm_program_page();
+            if (r != TP_OK) {
+                if (err_addr) *err_addr = s_strm.addr;
+                return r;
+            }
+        }
+    }
+
+    g_status.progress = s_strm.received;
+    return TP_OK;
+}
+
+uint8_t TargetStream_End(uint32_t *err_addr)
+{
+    const flash_algo_t *algo = ACTIVE_ALGO;
+    uint32_t crc;
+    uint8_t  r;
+
+    if (err_addr) *err_addr = 0;
+    if (!s_strm.active) return TP_ERR_PARAM;
+
+    if (s_strm.received != s_strm.len) {
+        s_strm.active = 0;
+        strm_reset_run();
+        return TP_ERR_PARAM;
+    }
+
+    /* 尾部不足一页: 0xFF 补齐后写入 (Flash 擦除态) */
+    if (s_strm.page_off != 0) {
+        memset(&s_strm.page_buf[s_strm.page_off], 0xFF,
+               s_strm.page_size - s_strm.page_off);
+        s_strm.page_off = s_strm.page_size;
+        r = strm_program_page();
+        if (r != TP_OK) {
+            if (err_addr) *err_addr = s_strm.addr;
+            s_strm.active = 0;
+            strm_reset_run();
+            return r;
+        }
+    }
+
+    (void)algo_call(algo, algo->uninit, 3, 0, 0,
+                    algo->prog_timeout_ms + 500u, TP_OK);
+
+    /* ---- 回读 CRC32 校验 ---- */
+    {
+        uint32_t words = (s_strm.len + 3u) / 4u;
+        uint32_t off = 0;
+        uint32_t buf[32];
+        crc = 0xFFFFFFFFu;
+        while (off < words) {
+            uint32_t n = (words - off > 32u) ? 32u : (words - off);
+            uint32_t i, remain = s_strm.len - off * 4u;
+            if (SWD_Mem_ReadBlock(s_strm.load + off * 4u, buf, n) != SWD_OK) {
+                s_strm.active = 0;
+                SWD_GPIO_Release();
+                return TP_ERR_CONNECT;
+            }
+            for (i = 0; i < n && remain; i++,
+                 remain = (remain >= 4u) ? remain - 4u : 0) {
+                uint32_t take = (remain >= 4u) ? 4u : remain;
+                crc = CRC32_Update(crc, (const uint8_t *)&buf[i], take);
+            }
+            off += n;
+        }
+        crc ^= 0xFFFFFFFFu;
+    }
+
+    s_strm.active = 0;
+    g_status.progress = s_strm.len;
+
+    if (crc != s_strm.crc) {
+        strm_reset_run();
+        return TP_ERR_VERIFY;
+    }
+
+    strm_reset_run();
+    return TP_OK;
+}
+
+/* ---------------- 整片擦除 ---------------- */
+uint8_t TargetEraseChip(void)
+{
+    const flash_algo_t *algo = ACTIVE_ALGO;
+    uint32_t v;
+    uint8_t  r;
+
+    g_target_flash_kb = 0;
+    g_status.swd_err = 0;
+
+    r = SWD_Connect(&v);
+    g_status.swd_err = r;
+    if (r != SWD_OK) { SWD_GPIO_Release(); return TP_ERR_CONNECT; }
+    g_status.target_dpidr = v;
+
+    if (SWD_Mem_Read32(DBG_IDCODE, &v) != SWD_OK) {
+        SWD_GPIO_Release();
+        return TP_ERR_CONNECT;
+    }
+    g_status.target_idcode = v;
+    if (target_id_check(v) != TP_OK) { SWD_GPIO_Release(); return TP_ERR_IDCODE; }
+
+    if (SWD_Mem_Read32(DBG_CR, &v) == SWD_OK)
+        (void)SWD_Mem_Write32(DBG_CR, v | DBG_IWDG_STOP | DBG_WWDG_STOP);
+    if (SWD_Mem_Write32(DHCSR, 0xA05F0003u) != SWD_OK) {
+        SWD_GPIO_Release();
+        return TP_ERR_HALT;
+    }
+    SWD_ReleaseNRST();
+
+    if (SWD_Mem_Read32(FLASH_SIZE_REG, &v) == SWD_OK) {
+        g_target_flash_kb = v & 0xFFFFu;
+        if (g_target_flash_kb > 4096u) g_target_flash_kb = 0;
+    }
+
+    if (FlashAlgo_Load(algo) != FA_OK) { strm_reset_run(); return TP_ERR_CONNECT; }
+    r = algo_call(algo, algo->init, 0x08000000u, 0, 1,
+                  algo->prog_timeout_ms + 500u, TP_ERR_ALGO);
+    if (r != TP_OK) { strm_reset_run(); return r; }
+
+    if (algo->erase_chip != 0xFFFFFFFFu) {
+        r = algo_call(algo, algo->erase_chip, 0, 0, 0,
+                      algo->erase_timeout_ms + 2000u, TP_ERR_ERASE);
+    } else if (g_target_flash_kb != 0) {
+        uint32_t sec, end = 0x08000000u + g_target_flash_kb * 1024u;
+        r = TP_OK;
+        for (sec = 0x08000000u; sec < end && r == TP_OK; sec += algo->sector_size)
+            r = algo_call(algo, algo->erase_sector, sec, 0, 0,
+                          algo->erase_timeout_ms + 500u, TP_ERR_ERASE);
+    } else {
+        r = TP_ERR_ERASE;
+    }
+
+    (void)algo_call(algo, algo->uninit, 3, 0, 0,
+                    algo->prog_timeout_ms + 500u, TP_OK);
+
+    /* 空白校验: 首字与末字都应是 0xFFFFFFFF */
+    if (r == TP_OK) {
+        uint32_t w0, w1;
+        if (SWD_Mem_Read32(0x08000000u, &w0) != SWD_OK) {
+            r = TP_ERR_CONNECT;
+        } else if (w0 != 0xFFFFFFFFu) {
+            r = TP_ERR_ERASE;
+        } else if (g_target_flash_kb != 0) {
+            if (SWD_Mem_Read32(0x08000000u + g_target_flash_kb * 1024u - 4u, &w1) != SWD_OK)
+                r = TP_ERR_CONNECT;
+            else if (w1 != 0xFFFFFFFFu)
+                r = TP_ERR_ERASE;
+        }
+    }
+
+    strm_reset_run();
+    return r;
 }
 #endif

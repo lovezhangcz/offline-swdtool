@@ -31,6 +31,10 @@
 #define CMD_REBOOT_BOOT 0x23u
 #define CMD_LOG_POLL    0x24u
 #define CMD_CLK_TEST    0x25u
+#define CMD_STRM_BEGIN  0x30u
+#define CMD_STRM_DATA   0x31u
+#define CMD_STRM_END    0x32u
+#define CMD_TGT_ERASE   0x33u
 
 #define RSP_OK          0x00u
 #define RSP_ERR_ARG     0x01u
@@ -274,6 +278,100 @@ static void cmd_exec(uint8_t cmd, const uint8_t *pl, uint16_t len)
         uint8_t lb[48];
         uint16_t n = Log_Read(lb, (uint16_t)sizeof(lb));
         proto_respond(cmd, RSP_OK, lb, n);
+        break;
+    }
+
+    case CMD_STRM_BEGIN: {
+        uint32_t n_len, n_crc, n_addr, err = 0;
+        uint8_t sr;
+        if (len != 12u) { proto_respond(cmd, RSP_ERR_ARG, 0, 0); break; }
+        if (g_status.state == 2u) { proto_respond(cmd, RSP_ERR_STATE, 0, 0); break; }
+        memcpy(&n_len,  &pl[0], 4);
+        memcpy(&n_crc,  &pl[4], 4);
+        memcpy(&n_addr, &pl[8], 4);
+        g_status.state = 2u;
+        g_status.progress = 0;
+        g_status.last_result = 0;
+        sr = TargetStream_Begin(n_len, n_crc, n_addr, &err);
+        if (sr != TP_OK) {
+            SWD_GPIO_Release();
+            g_status.last_result = 2;
+            g_status.last_error = ((uint32_t)sr) | (err & 0xFFFFFF00u);
+            g_status.state = 4u;
+        }
+        p[0] = sr;
+        memcpy(&p[1], &g_target_flash_kb, 4);
+        memcpy(&p[5], &err, 4);
+        proto_respond(cmd, RSP_OK, p, 9);
+        break;
+    }
+
+    case CMD_STRM_DATA: {
+        uint32_t off, err = 0;
+        uint8_t sr;
+        if (g_status.state != 2u || len < 5u) {
+            proto_respond(cmd, RSP_ERR_STATE, 0, 0);
+            break;
+        }
+        memcpy(&off, pl, 4);
+        sr = TargetStream_Data(off, &pl[4], (uint16_t)(len - 4u), &err);
+        if (sr != TP_OK) {
+            SWD_GPIO_Release();
+            g_status.last_result = 2;
+            g_status.last_error = ((uint32_t)sr) | (err & 0xFFFFFF00u);
+            g_status.state = 4u;
+        }
+        p[0] = sr;
+        memcpy(&p[1], (const void *)&g_status.progress, 4);
+        memcpy(&p[5], &err, 4);
+        proto_respond(cmd, RSP_OK, p, 9);
+        break;
+    }
+
+    case CMD_STRM_END: {
+        uint32_t err = 0;
+        uint8_t sr;
+        if (g_status.state != 2u) { proto_respond(cmd, RSP_ERR_STATE, 0, 0); break; }
+        sr = TargetStream_End(&err);
+        g_status.last_error = ((uint32_t)sr) | (err & 0xFFFFFF00u);
+        g_status.last_result = (sr == TP_OK) ? 1u : 2u;
+        g_status.state = (sr == TP_OK) ? 3u : 4u;
+        if (sr == TP_OK) {
+            Log_Str("STRM OK\n");
+        } else {
+            Log_Str("STRM ERR code=");
+            Log_Dec(sr);
+            Log_Str("\n");
+        }
+        p[0] = sr;
+        memcpy(&p[1], &err, 4);
+        proto_respond(cmd, RSP_OK, p, 5);
+        break;
+    }
+
+    case CMD_TGT_ERASE: {
+        uint8_t sr;
+        if (g_status.state == 2u) {
+            proto_respond(cmd, RSP_ERR_STATE, 0, 0);
+            break;
+        }
+        g_status.state = 2u;
+        g_status.progress = 0;
+        g_status.last_result = 0;
+        sr = TargetEraseChip();
+        g_status.last_error = sr;
+        g_status.last_result = (sr == TP_OK) ? 1u : 2u;
+        g_status.state = (sr == TP_OK) ? 3u : 4u;
+        if (sr == TP_OK) {
+            Log_Str("ERASE OK\n");
+        } else {
+            Log_Str("ERASE ERR code=");
+            Log_Dec(sr);
+            Log_Str("\n");
+        }
+        p[0] = sr;
+        memcpy(&p[1], &g_target_flash_kb, 4);
+        proto_respond(cmd, RSP_OK, p, 5);
         break;
     }
 

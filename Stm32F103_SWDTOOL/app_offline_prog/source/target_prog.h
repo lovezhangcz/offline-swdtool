@@ -26,6 +26,11 @@
 #define TP_ERR_VERIFY      8u    /* CRC 校验不一致 */
 #define TP_ERR_NOIMAGE     9u
 #define TP_ERR_ALGO        10u   /* 烧录算法执行失败 */
+#define TP_ERR_SIZE        11u   /* 超出目标 Flash 容量 */
+#define TP_ERR_PARAM       12u   /* 参数错误 */
+#define TP_ERR_HEX         13u   /* 镜像是 HEX 文本, 不是 bin */
+#define TP_ERR_SIZE        11u   /* 超出目标 Flash 容量 */
+#define TP_ERR_PARAM       12u   /* 参数错误 (长度/偏移) */
 
 /* 烧录状态 (main.c / target_prog.c / proto.c 共享) */
 typedef struct {
@@ -39,6 +44,26 @@ typedef struct {
 } prog_status_t;
 
 extern prog_status_t g_status;
+
+/* 最近一次 TargetStream_Begin 读到的目标 Flash 容量 (KB, 0=未知) */
+extern uint32_t g_target_flash_kb;
+
+/* ---------------- 流式烧录 (镜像不落本机 Flash) ----------------
+ * 上位机分包下发数据, 设备边收边写目标 Flash, 因此镜像大小只受
+ * 目标芯片 Flash 容量限制, 不受本机 16KB 镜像区限制。
+ * 用法: Begin -> Data(可直接多次, offset 必须连续) -> End
+ */
+uint8_t TargetStream_Begin(uint32_t total_len, uint32_t crc32,
+                           uint32_t load_addr, uint32_t *err_addr);
+uint8_t TargetStream_Data(uint32_t offset, const uint8_t *data,
+                          uint16_t len, uint32_t *err_addr);
+uint8_t TargetStream_End(uint32_t *err_addr);
+
+/**
+  * 整片擦除目标芯片 (全片擦除 + 首末字空白校验), 结束后复位运行
+  * @return TP_xxx, 目标 Flash 容量见 g_target_flash_kb
+  */
+uint8_t TargetEraseChip(void);
 
 /**
   * 执行一次完整烧录

@@ -222,6 +222,10 @@ int main(void)
 
         if (s_state == ST_PROGRAMMING) continue;
 
+        /* 流式烧录会话中 (协议层占用 SWD): 主循环不要探测/释放引脚,
+           否则会把正在进行的 SWD 会话打断 */
+        if (g_status.state == ST_PROGRAMMING) continue;
+
 #if USB_HAS_CDC
         /* 手动触发 (上位机可发 PROG_NOW 命令) */
         if (Proto_TakeProgRequest()) {
