@@ -115,13 +115,16 @@
  * TARGET_CHIP_GD32F103 : GD32F103 系列 (Cortex-M3, 如 GD32F103C8T6)
  *   DEV_ID 0x410 与 STM32F103 中容量相同; FMC 寄存器布局/解锁密钥与
  *   STM32F1 一致, 但擦除更慢 (1KB 页, 擦除超时放宽), 且 FMC_PID
- *   (0x40022100) 读出 0x41424333 可确认为 GD32。                     */
+ *   (0x40022100) 读出 0x41424333 可确认为 GD32。
+ * TARGET_CHIP_GD32F303 : GD32F303 系列 (Cortex-M4, DEV_ID 0x414, REV 0x2104)
+ *   FMC 与 F1 兼容, 扇区 2KB (编程页 1KB), 512KB 版本用 GD32F30x_HD.FLM。 */
 #define TARGET_CHIP_STM32F1     1
 #define TARGET_CHIP_GD32F1X0    2
 #define TARGET_CHIP_GD32F103    3
+#define TARGET_CHIP_GD32F303    4
 
 #ifndef TARGET_CHIP
-#define TARGET_CHIP             TARGET_CHIP_GD32F103   /* 当前目标: GD32F103C8T6 */
+#define TARGET_CHIP             TARGET_CHIP_GD32F303   /* 当前目标: GD32F303 */
 #endif
 
 /* ---------------------------------------------------------------- SWD ---- */

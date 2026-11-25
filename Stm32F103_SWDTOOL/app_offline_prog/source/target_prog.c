@@ -34,6 +34,8 @@
 /* 按 board.h 的 TARGET_CHIP 选择烧录算法 */
 #if TARGET_CHIP == TARGET_CHIP_GD32F1X0
   #define ACTIVE_ALGO   (&FLASH_ALGO_GD32F1X0)
+#elif TARGET_CHIP == TARGET_CHIP_GD32F303
+  #define ACTIVE_ALGO   (&FLASH_ALGO_GD32F303)
 #elif TARGET_CHIP == TARGET_CHIP_GD32F103
   #define ACTIVE_ALGO   (&FLASH_ALGO_GD32F103)
 #else
@@ -60,6 +62,14 @@ static uint8_t target_id_check(uint32_t idcode)
     if (dev != 0x410u) return TP_ERR_IDCODE;
     if (rev != 0x1303u) return TP_ERR_IDCODE;    /* 防止误烧 STM32F1 */
     return TP_OK;
+#elif TARGET_CHIP == TARGET_CHIP_GD32F303
+    /* GD32F303: DEV_ID 0x414 (与 STM32F103 大容量同值), REV_ID 0x2104;
+       用 FMC_PID 诊断确认, 但不作为拒绝条件 (掩码可能不同)          */
+    uint32_t pid = 0;
+    (void)rev;
+    if (dev != 0x414u) return TP_ERR_IDCODE;
+    (void)SWD_Mem_Read32(FMC_PID, &pid);
+    return TP_OK;
 #else
     /* STM32F1: 中容量/低容量/大容量/互联型/XL 系列 */
     (void)rev;
@@ -78,8 +88,14 @@ static uint8_t algo_call(const flash_algo_t *algo, uint32_t entry,
     uint32_t ret = 0;
     uint8_t r = FlashAlgo_Call(algo, entry, a1, a2, a3, 0, timeout_ms, &ret);
     if (r == FA_ERR_SWD)     return TP_ERR_CONNECT;
-    if (r == FA_ERR_TIMEOUT) return fa_map;
-    if (r == FA_ERR_RETVAL)  return fa_map;   /* ret!=0: 擦/写失败 (ret=3 常表示写保护) */
+    if (r == FA_ERR_TIMEOUT || r == FA_ERR_RETVAL) {
+        /* 调试线索: 哪一步、超时还是返回值非 0 */
+        Log_Str("ALG e=");  Log_Hex(entry);
+        Log_Str(" r=");     Log_Hex(r);
+        Log_Str(" ret=");   Log_Hex(ret);
+        Log_Str("\n");
+        return fa_map;
+    }
     return TP_OK;
 }
 

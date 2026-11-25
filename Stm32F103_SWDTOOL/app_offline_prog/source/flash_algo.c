@@ -97,6 +97,10 @@ uint8_t FlashAlgo_Call(const flash_algo_t *algo, uint32_t entry,
         if (SWD_Mem_Read32(DHCSR, &v) != SWD_OK) return FA_ERR_SWD;
         if (v & S_HALT) break;
         if ((BSP_Millis() - t0) > timeout_ms) {
+            /* 超时: 把当前 PC 带出 (ret), 便于判断算法卡在哪/是否进了 HardFault */
+            uint32_t pc = 0;
+            (void)core_reg_read(15, &pc);
+            if (ret) *ret = pc;
             (void)SWD_Mem_Write32(DHCSR, DHCSR_KEY | 0x3u);  /* 强制停机 */
             return FA_ERR_TIMEOUT;
         }
