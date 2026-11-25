@@ -14,7 +14,12 @@
 ".\obj_cdc\usb_hw.o"
 ".\obj_cdc\usb_cdc.o"
 ".\obj_cdc\usb_msc.o"
+".\obj_cdc\usb_comp.o"
 ".\obj_cdc\vfs.o"
+".\obj_cdc\log.o"
+".\obj_cdc\boot_main.o"
+".\obj_cdc\boot_flash.o"
+".\obj_cdc\boot_proto.o"
 --library_type=microlib --strict --scatter ".\obj_cdc\offline_prog_cdc.sct"
 --summary_stderr --info summarysizes --map --load_addr_map_info --callgraph --symbols
 --info sizes

@@ -1,3 +1,4 @@
+#if !defined(BUILD_BOOT)
 /**
   * @file  storage.c
   * @brief 目标固件镜像存储: 内部 flash 擦写 (STM32F103 FPEC, 寄存器级)
@@ -173,10 +174,11 @@ uint8_t Storage_Write(uint32_t offset, const uint8_t *data, uint32_t len)
 
 uint32_t Storage_PayloadAddr(void)
 {
-    return IMG_STORE_ADDR + sizeof(img_hdr_t);
+    return IMG_STORE_ADDR + IMG_DATA_OFFSET;    /* 与 VFS(U 盘) 数据区偏移一致 */
 }
 
 const uint8_t *Storage_PayloadPtr(void)
 {
     return (const uint8_t *)Storage_PayloadAddr();
 }
+#endif

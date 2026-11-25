@@ -17,7 +17,7 @@
 #include <stdint.h>
 #include "board.h"
 
-#if USB_MODE == USB_MODE_MSC
+#if USB_HAS_MSC
 
 /* MSC 扇区大小 (必须 512, 与 FAT 一致) */
 #define MSC_SECTOR_SZ       512u
@@ -46,8 +46,17 @@ void USB_MSC_EndTransfer(uint8_t success);
  */
 uint8_t *USB_MSC_GetWriteBuf(void);
 
-/* ---- 描述符初始化 (main.c 中调用) ---- */
+/* ---- 描述符初始化 (仅单功能 MSC 模式) ---- */
+#if USB_MODE == USB_MODE_MSC
 void USB_MSC_InitDesc(void);
+#endif
+
+#if USB_MODE == USB_MODE_COMP
+/* 复合设备: 由 usb_comp.c 转发底层事件 */
+void MSC_CB_Reset(void);
+void MSC_CB_BulkOut(const uint8_t *data, uint16_t len);
+void MSC_CB_BulkInDone(void);
+#endif
 
 /* ---- VFS 层函数约定 (由 vfs.c 实现) ---- */
 /*

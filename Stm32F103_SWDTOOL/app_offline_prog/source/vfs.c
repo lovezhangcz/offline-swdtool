@@ -1,3 +1,4 @@
+#if !defined(BUILD_BOOT)
 /**
   * @file  vfs.c
   * @brief 极简虚拟 FAT12 文件系统 (L2精简, 单文件模式)
@@ -30,7 +31,7 @@
 #include "crc.h"
 #include "board.h"
 
-#if USB_MODE == USB_MODE_MSC
+#if USB_HAS_MSC
 
 #include <string.h>
 
@@ -891,4 +892,5 @@ void VFS_Init(void)
     memset(g_fw_name, 0, FW_NAME_LEN);
 }
 
-#endif /* USB_MODE == USB_MODE_MSC */
+#endif /* USB_HAS_MSC */
+#endif

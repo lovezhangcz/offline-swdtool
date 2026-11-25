@@ -2,17 +2,18 @@
   * @file  usb_cdc.c
   * @brief USB CDC ACM 类: 描述符、EP0 控制通道状态机、批量数据通道
   *
-  *   VID:PID = 0483:5740 (ST CDC 演示用 ID, Windows 自动加载 usbser)
-  *   接口: 0 = CDC Control (EP1 interrupt IN), 1 = CDC Data (EP2 OUT / EP3 IN)
+  *   USB_MODE_CDC  : 单功能 CDC 设备 (VID:PID = 0483:5740, Windows 自动加载 usbser)
+  *   USB_MODE_COMP : 与 MSC 组成复合设备, 本文件只提供 CDC 数据通道 (描述符在 usb_comp.c)
   */
 #include "usb_hw.h"
 #include "usb_cdc.h"
 #include "board.h"
 
-#if USB_MODE == USB_MODE_CDC
+#if USB_HAS_CDC
 
 #include <string.h>
-#include "proto.h"
+
+#if USB_MODE == USB_MODE_CDC
 
 /* ------------------------------------------------ 描述符 ----------------- */
 static const uint8_t desc_device[18] = {
@@ -89,7 +90,6 @@ static void build_str(uint8_t *desc, const char *ascii, uint8_t hex_serial)
 static const uint8_t *s_ctrl_ptr;
 static uint16_t       s_ctrl_len;    /* 剩余待发送 */
 static uint8_t        s_set_address; /* 状态阶段完成后生效的地址 */
-static uint8_t        s_line_dtr;
 static uint8_t        s_line_coding[7] = { 0x00, 0xC2, 0x01, 0x00, 0x00, 0x00, 0x08 }; /* 115200 8N1 */
 
 static void ep0_tx(const uint8_t *d, uint16_t n)
@@ -123,7 +123,7 @@ static void ep0_read_start(const uint8_t *d, uint16_t len, uint16_t host_len)
     }
 }
 
-void USB_CB_Setup(const uint8_t *pkt)
+static void CDC_CB_Setup(const uint8_t *pkt)
 {
     uint8_t  bmType = pkt[0];
     uint8_t  bReq   = pkt[1];
@@ -184,7 +184,7 @@ void USB_CB_Setup(const uint8_t *pkt)
             ep0_read_start(s_line_coding, 7, wLength);
             break;
         case 0x22:                                   /* SET_CONTROL_LINE_STATE */
-            s_line_dtr = (uint8_t)(wValue & 0x01u);
+            USB_CDC_SetDtr((uint8_t)(wValue & 0x01u));
             ep0_tx(0, 0);
             break;
         default:
@@ -196,7 +196,7 @@ void USB_CB_Setup(const uint8_t *pkt)
     }
 }
 
-void USB_CB_EP0_TxDone(void)
+static void CDC_CB_EP0_TxDone(void)
 {
     if (s_set_address) {
         USB_SetAddress(s_set_address);
@@ -213,7 +213,7 @@ void USB_CB_EP0_TxDone(void)
     /* 本工程所有描述符与应答长度都不是 64 的整数倍, 无需 ZLP */
 }
 
-void USB_CB_EP0_RxDone(uint16_t len)
+static void CDC_CB_EP0_RxDone(uint16_t len)
 {
     if (len == 7u) {
         /* SET_LINE_CODING 的数据阶段 -> 回状态阶段 (0 长度 IN) */
@@ -225,6 +225,8 @@ void USB_CB_EP0_RxDone(uint16_t len)
     }
 }
 
+#endif /* USB_MODE == USB_MODE_CDC */
+
 /* ------------------------------------------------ 批量数据通道 ----------- */
 /* 简单 4 包发送环形队列, 每包 <=64B */
 #define TXQ_DEPTH 4u
@@ -232,15 +234,16 @@ static uint8_t  s_txq[TXQ_DEPTH][64];
 static uint8_t  s_txq_len[TXQ_DEPTH];
 static volatile uint8_t s_txq_head, s_txq_tail;
 static volatile uint8_t s_tx_busy;
+static volatile uint8_t s_line_dtr;
 
 static void tx_kick(void)
 {
     __disable_irq();                    /* 与 BulkInDone(ISR) 互斥 */
     if (!s_tx_busy && s_txq_head != s_txq_tail) {
         s_tx_busy = 1;
-        USB_PMA_Write(USB_EP_GetTxAddr(USB_EP3), s_txq[s_txq_tail], s_txq_len[s_txq_tail]);
-        USB_EP_SetTxCount(USB_EP3, s_txq_len[s_txq_tail]);
-        USB_EP_SetTxStatus(USB_EP3, USB_STAT_VALID);
+        USB_PMA_Write(USB_EP_GetTxAddr(USB_CDC_IN_EP), s_txq[s_txq_tail], s_txq_len[s_txq_tail]);
+        USB_EP_SetTxCount(USB_CDC_IN_EP, s_txq_len[s_txq_tail]);
+        USB_EP_SetTxStatus(USB_CDC_IN_EP, USB_STAT_VALID);
     }
     __enable_irq();
 }
@@ -261,7 +264,7 @@ uint16_t USB_CDC_Write(const uint8_t *data, uint16_t len)
     return len;
 }
 
-void USB_CB_BulkInDone(void)
+void CDC_CB_BulkInDone(void)
 {
     s_txq_tail = (uint8_t)((s_txq_tail + 1u) % TXQ_DEPTH);
     s_tx_busy = 0;
@@ -269,9 +272,9 @@ void USB_CB_BulkInDone(void)
 }
 
 /* 主机 -> 设备数据: 转发给协议层环形缓冲 (ISR 上下文, 只做拷贝) */
-void USB_CB_BulkOut(const uint8_t *data, uint16_t len)
+void CDC_CB_BulkOut(const uint8_t *data, uint16_t len)
 {
-    Proto_RxBytes(data, len);
+    CDC_RxBytes(data, len);
 }
 
 void USB_CDC_Poll(void)
@@ -285,13 +288,19 @@ uint8_t USB_CDC_HostActive(void)
     return s_line_dtr;
 }
 
-void USB_CB_Reset(void)
+void USB_CDC_SetDtr(uint8_t dtr)
+{
+    s_line_dtr = dtr;
+}
+
+void CDC_CB_Reset(void)
 {
     s_txq_head = s_txq_tail = 0;
     s_tx_busy = 0;
     s_line_dtr = 0;
 }
 
+#if USB_MODE == USB_MODE_CDC
 /* ------------------------------------------------ 初始化 ----------------- */
 void USB_CDC_Init(void)
 {
@@ -301,4 +310,13 @@ void USB_CDC_Init(void)
     USB_HW_Init();
 }
 
-#endif /* USB_MODE == USB_MODE_CDC */
+/* 单功能 CDC: 把底层回调接到本文件 */
+void USB_CB_Reset(void)              { CDC_CB_Reset(); }
+void USB_CB_Setup(const uint8_t *p)  { CDC_CB_Setup(p); }
+void USB_CB_EP0_TxDone(void)         { CDC_CB_EP0_TxDone(); }
+void USB_CB_EP0_RxDone(uint16_t len) { CDC_CB_EP0_RxDone(len); }
+void USB_CB_BulkOut(uint8_t ep, const uint8_t *d, uint16_t n) { (void)ep; CDC_CB_BulkOut(d, n); }
+void USB_CB_BulkInDone(uint8_t ep)   { (void)ep; CDC_CB_BulkInDone(); }
+#endif
+
+#endif /* USB_HAS_CDC */

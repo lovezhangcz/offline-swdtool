@@ -38,5 +38,6 @@ typedef struct {
 
 extern const flash_algo_t FLASH_ALGO_GD32F1X0;   /* GD32F130/150 64KB */
 extern const flash_algo_t FLASH_ALGO_STM32F1;    /* STM32F10x 中容量   */
+extern const flash_algo_t FLASH_ALGO_GD32F103;   /* GD32F103C8 64KB    */
 
 #endif

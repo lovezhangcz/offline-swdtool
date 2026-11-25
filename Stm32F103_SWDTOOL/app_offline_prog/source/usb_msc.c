@@ -17,9 +17,13 @@
 #include "usb_hw.h"
 #include "board.h"
 
-#if USB_MODE == USB_MODE_MSC
+#if USB_HAS_MSC
 
 #include <string.h>
+
+static void msc_reset(void);   /* 前向声明, 在 BOT 部分定义 */
+
+#if USB_MODE == USB_MODE_MSC
 
 /* ================================================================
  *                        描述符
@@ -90,8 +94,6 @@ static void build_str(uint8_t *desc, const char *ascii, uint8_t hex_serial)
 /* ================================================================
  *                      EP0 控制状态机
  * ================================================================ */
-
-static void msc_reset(void);   /* 前向声明, 在 BOT 部分定义 */
 
 static const uint8_t *s_ctrl_ptr;
 static uint16_t       s_ctrl_len;
@@ -223,6 +225,8 @@ void USB_CB_EP0_RxDone(uint16_t len)
     ep0_tx(0, 0);
 }
 
+#endif /* USB_MODE == USB_MODE_MSC */
+
 /* ================================================================
  *                   BOT (Bulk-Only Transport)
  * ================================================================ */
@@ -317,13 +321,13 @@ static const uint8_t scsi_sense_hdr[] = {
  *                    批量端点回调 (底层 -> MSC)
  * ================================================================ */
 
-void USB_CB_Reset(void)
+void MSC_CB_Reset(void)
 {
     msc_reset();
 }
 
 /* 批量 OUT 数据到达 */
-void USB_CB_BulkOut(const uint8_t *data, uint16_t len)
+void MSC_CB_BulkOut(const uint8_t *data, uint16_t len)
 {
     if (g_bot_state == BOT_IDLE) {
         /* ---- 期望 CBW (31 字节) ---- */
@@ -394,7 +398,7 @@ void USB_CB_BulkOut(const uint8_t *data, uint16_t len)
 }
 
 /* 批量 IN 发送完成 */
-void USB_CB_BulkInDone(void)
+void MSC_CB_BulkInDone(void)
 {
     if (g_bot_state == BOT_DATA_IN) {
         if (g_data_remain > 0 || g_sectors_left > 0) {
@@ -690,6 +694,7 @@ uint8_t *USB_MSC_GetWriteBuf(void)
  *                    描述符初始化 (供 main.c 调用)
  * ================================================================ */
 
+#if USB_MODE == USB_MODE_MSC
 void USB_MSC_InitDesc(void)
 {
     build_str(desc_str_man, "SWD Tools", 0);
@@ -697,4 +702,10 @@ void USB_MSC_InitDesc(void)
     build_str(desc_str_ser, NULL, 1);
 }
 
-#endif /* USB_MODE == USB_MODE_MSC */
+/* 单功能 MSC: 把底层回调接到本文件 */
+void USB_CB_Reset(void)        { MSC_CB_Reset(); }
+void USB_CB_BulkOut(uint8_t ep, const uint8_t *d, uint16_t n) { (void)ep; MSC_CB_BulkOut(d, n); }
+void USB_CB_BulkInDone(uint8_t ep) { (void)ep; MSC_CB_BulkInDone(); }
+#endif
+
+#endif /* USB_HAS_MSC */

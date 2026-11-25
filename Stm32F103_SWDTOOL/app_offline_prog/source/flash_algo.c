@@ -1,3 +1,4 @@
+#if !defined(BUILD_BOOT)
 /**
   * @file  flash_algo.c
   * @brief Keil FLM 烧录算法的目标侧执行器
@@ -14,7 +15,7 @@
 #include "bsp.h"
 #include "board.h"
 
-#if USB_MODE == USB_MODE_CDC
+#if USB_HAS_CDC
   #include "proto.h"
   #define ALGO_POLL()   Proto_Poll()
 #else
@@ -106,3 +107,4 @@ uint8_t FlashAlgo_Call(const flash_algo_t *algo, uint32_t entry,
     if (ret) *ret = v;
     return (v == 0) ? FA_OK : FA_ERR_RETVAL;
 }
+#endif

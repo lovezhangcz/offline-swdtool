@@ -23,10 +23,10 @@
 #include <stdint.h>
 #include "board.h"
 
-#if USB_MODE == USB_MODE_MSC
+#if USB_HAS_MSC
 
 /* 初始化 VFS (在 main.c 中调用一次) */
 void VFS_Init(void);
 
-#endif /* USB_MODE == USB_MODE_MSC */
+#endif /* USB_HAS_MSC */
 #endif /* __VFS_H */

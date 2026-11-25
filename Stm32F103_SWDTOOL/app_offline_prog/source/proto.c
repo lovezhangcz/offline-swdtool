@@ -1,3 +1,4 @@
+#if !defined(BUILD_BOOT)
 /**
   * @file  proto.c
   * @brief 上位机通信协议实现
@@ -7,21 +8,29 @@
 #include "usb_cdc.h"
 #include "storage.h"
 #include "target_prog.h"
+#include "swd_host.h"
 #include "crc.h"
+#include "board.h"
+#include "bsp.h"
+#include "log.h"
 
-#if USB_MODE == USB_MODE_CDC
+#if USB_HAS_CDC
 
 #define FRAME_HDR0   0xAAu
 #define FRAME_HDR1   0x55u
 
 #define CMD_PING        0x01u
 #define CMD_GET_INFO    0x02u
+#define CMD_GET_VERSION 0x03u
 #define CMD_IMG_BEGIN   0x10u
 #define CMD_IMG_DATA    0x11u
 #define CMD_IMG_END     0x12u
 #define CMD_PROG_NOW    0x20u
 #define CMD_GET_STATUS  0x21u
 #define CMD_TGT_PROBE   0x22u
+#define CMD_REBOOT_BOOT 0x23u
+#define CMD_LOG_POLL    0x24u
+#define CMD_CLK_TEST    0x25u
 
 #define RSP_OK          0x00u
 #define RSP_ERR_ARG     0x01u
@@ -46,6 +55,12 @@ void Proto_RxBytes(const uint8_t *data, uint16_t len)
         s_rx_ring[s_rx_head] = data[i];
         s_rx_head = next;
     }
+}
+
+/* usb_cdc.c 的接收回调 (boot 工程里由 boot_proto.c 提供同名实现) */
+void CDC_RxBytes(const uint8_t *data, uint16_t len)
+{
+    Proto_RxBytes(data, len);
 }
 
 /* ------------------------- 帧解析状态机 ---------------------------------- */
@@ -88,6 +103,24 @@ static void proto_respond(uint8_t cmd, uint8_t status, const uint8_t *payload, u
 static uint32_t s_img_len, s_img_crc, s_img_addr, s_img_received;
 static uint8_t  s_img_active;
 
+/* 置标记后软复位: boot 看到标记直接进入升级模式 */
+static void app_reboot_to_boot(void)
+{
+    Log_Str("REBOOT BOOT\n");
+
+    RCC->APB1ENR |= RCC_APB1ENR_PWREN | RCC_APB1ENR_BKPEN;
+    PWR->CR |= PWR_CR_DBP;
+    BKP_REG_FORCE = BOOT_FORCE_MAGIC;
+
+#ifdef USB_PULLUP_PORT
+  #if USB_PULLUP_ACTIVE
+    USB_PULLUP_PORT->BRR  = (1u << USB_PULLUP_PIN);
+  #else
+    USB_PULLUP_PORT->BSRR = (1u << USB_PULLUP_PIN);
+  #endif
+#endif
+}
+
 static void cmd_exec(uint8_t cmd, const uint8_t *pl, uint16_t len)
 {
     uint8_t p[24];
@@ -96,6 +129,12 @@ static void cmd_exec(uint8_t cmd, const uint8_t *pl, uint16_t len)
     case CMD_PING:
         proto_respond(cmd, RSP_OK, (const uint8_t *)"SWDPROG1", 8);
         break;
+
+    case CMD_GET_VERSION: {
+        static const char vs[] = "v" APP_VERSION_STR " " __DATE__ " " __TIME__;
+        proto_respond(cmd, RSP_OK, (const uint8_t *)vs, (uint16_t)(sizeof(vs) - 1u));
+        break;
+    }
 
     case CMD_GET_INFO: {
         const img_hdr_t *h = Storage_Header();
@@ -147,7 +186,7 @@ static void cmd_exec(uint8_t cmd, const uint8_t *pl, uint16_t len)
             break;
         }
         /* 写载荷区: 存储偏移 = 头 + off */
-        r = Storage_Write(sizeof(img_hdr_t) + off, &pl[4], (uint32_t)(len - 4u));
+        r = Storage_Write(IMG_DATA_OFFSET + off, &pl[4], (uint32_t)(len - 4u));
         if (r != STORAGE_OK) { proto_respond(cmd, RSP_ERR_FLASH, 0, 0); break; }
         s_img_received += (uint32_t)(len - 4u);
         memcpy(p, &s_img_received, 4);
@@ -214,6 +253,27 @@ static void cmd_exec(uint8_t cmd, const uint8_t *pl, uint16_t len)
         memcpy(&p[1], &dpidr,  4);
         memcpy(&p[5], &idcode, 4);
         proto_respond(cmd, RSP_OK, p, 9);
+        break;
+    }
+
+    case CMD_REBOOT_BOOT:
+        proto_respond(cmd, RSP_OK, 0, 0);   /* 先把应答排进发送队列 */
+        BSP_DelayMs(80);
+        app_reboot_to_boot();
+        BSP_DelayMs(120);                   /* 让主机看到 USB 断开 */
+        NVIC_SystemReset();
+        break;
+
+    case CMD_CLK_TEST:
+        /* 示波器测试: payload[0]!=0 开启持续输出 SWCLK/SWDIO 方波, 0 关闭 */
+        g_clk_test = (uint8_t)((len >= 1u && pl[0]) ? 1u : 0u);
+        proto_respond(cmd, RSP_OK, 0, 0);
+        break;
+
+    case CMD_LOG_POLL: {
+        uint8_t lb[48];
+        uint16_t n = Log_Read(lb, (uint16_t)sizeof(lb));
+        proto_respond(cmd, RSP_OK, lb, n);
         break;
     }
 
@@ -293,4 +353,5 @@ void Proto_Poll(void)
     }
 }
 
-#endif /* USB_MODE == USB_MODE_CDC */
+#endif /* USB_HAS_CDC */
+#endif

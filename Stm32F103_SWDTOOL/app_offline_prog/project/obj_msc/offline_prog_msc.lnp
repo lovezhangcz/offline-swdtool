@@ -14,7 +14,12 @@
 ".\obj_msc\usb_hw.o"
 ".\obj_msc\usb_cdc.o"
 ".\obj_msc\usb_msc.o"
+".\obj_msc\usb_comp.o"
 ".\obj_msc\vfs.o"
+".\obj_msc\log.o"
+".\obj_msc\boot_main.o"
+".\obj_msc\boot_flash.o"
+".\obj_msc\boot_proto.o"
 --library_type=microlib --strict --scatter ".\obj_msc\offline_prog_msc.sct"
 --summary_stderr --info summarysizes --map --load_addr_map_info --callgraph --symbols
 --info sizes

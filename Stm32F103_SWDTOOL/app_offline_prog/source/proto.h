@@ -9,11 +9,15 @@
   *   CMD:
   *     0x01 PING       -> "SWDPROG1"
   *     0x02 GET_INFO   -> valid, len, crc32, load_addr, capacity, state, result
+  *     0x03 GET_VERSION-> ASCII 版本号 + 编译时间
   *     0x10 IMG_BEGIN  <- len(4) crc32(4) load_addr(4)   擦除存储区
   *     0x11 IMG_DATA   <- offset(4) data[..<=508]        写镜像数据
   *     0x12 IMG_END    -> 校验 CRC, 生效镜像
   *     0x20 PROG_NOW   -> 手动触发一次烧录
   *     0x21 GET_STATUS -> state, result, err, dpidr, target_id, progress
+  *     0x22 TGT_PROBE  -> SWD 诊断探测
+  *     0x23 REBOOT_BOOT-> 置 BKP 标记并软复位进 bootloader (USB 升级)
+  *     0x24 LOG_POLL   -> 拉取诊断日志文本 (最多 48 字节/次, 空表示取完)
   *
   *   数据接收在 USB 中断里只做入环, 解析与执行在 Proto_Poll() (主循环)。
   */

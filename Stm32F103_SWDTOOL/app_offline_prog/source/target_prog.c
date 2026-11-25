@@ -1,3 +1,4 @@
+#if !defined(BUILD_BOOT)
 /**
   * @file  target_prog.c
   * @brief 目标烧录实现 (Keil FLM 算法 + SWD)
@@ -9,8 +10,9 @@
 #include "crc.h"
 #include "bsp.h"
 #include "board.h"
+#include "log.h"
 
-#if USB_MODE == USB_MODE_CDC
+#if USB_HAS_CDC
   #include "proto.h"
   #define USBD_POLL()    Proto_Poll()     /* CDC: 处理上位机命令 */
 #else
@@ -25,10 +27,14 @@
 #define DBG_CR       0xE0042004u
 #define DBG_IWDG_STOP  0x00000100u
 #define DBG_WWDG_STOP  0x00000200u
+/* ---- GD32 FMC 产品 ID ---- */
+#define FMC_PID        0x40022100u
 
 /* 按 board.h 的 TARGET_CHIP 选择烧录算法 */
 #if TARGET_CHIP == TARGET_CHIP_GD32F1X0
   #define ACTIVE_ALGO   (&FLASH_ALGO_GD32F1X0)
+#elif TARGET_CHIP == TARGET_CHIP_GD32F103
+  #define ACTIVE_ALGO   (&FLASH_ALGO_GD32F103)
 #else
   #define ACTIVE_ALGO   (&FLASH_ALGO_STM32F1)
 #endif
@@ -39,7 +45,16 @@ static uint8_t target_id_check(uint32_t idcode)
     uint32_t dev = idcode & 0xFFFu;
     uint32_t rev = (idcode >> 16) & 0xFFFFu;
 
-#if TARGET_CHIP == TARGET_CHIP_GD32F1X0
+#if TARGET_CHIP == TARGET_CHIP_GD32F103
+    /* GD32F103: DEV_ID 0x410 (与 STM32F103 中容量相同)。
+       再用 FMC_PID 确认一次, 读到 0x41424333 可判定为 GD32;
+       读不到也放行 (有些 GD32 掩码不同), 避免误拒。               */
+    uint32_t pid = 0;
+    (void)rev;
+    if (dev != 0x410u) return TP_ERR_IDCODE;
+    (void)SWD_Mem_Read32(FMC_PID, &pid);   /* 仅用于诊断, 不作为拒绝条件 */
+    return TP_OK;
+#elif TARGET_CHIP == TARGET_CHIP_GD32F1X0
     /* GD32F1x0 (GD32F130/150): DEV_ID 0x410, REV_ID 0x1303 */
     if (dev != 0x410u) return TP_ERR_IDCODE;
     if (rev != 0x1303u) return TP_ERR_IDCODE;    /* 防止误烧 STM32F1 */
@@ -89,9 +104,78 @@ uint8_t TargetProg_Detect(void)
 
 uint8_t TargetProg_Probe(uint32_t *dpidr, uint32_t *idcode)
 {
-    uint8_t r = SWD_Connect(dpidr);
+    uint8_t r = SWD_ERR_NORESP;
+    uint8_t idle, io_rel, io_hold, ck_rel, ck_hold, a2b, b2a;
+    uint32_t v = 0;
+    uint8_t i, c;
+
+    SWD_PinDiag(&idle, &io_rel, &io_hold, &ck_rel, &ck_hold);
+    Log_Str("SWD io id="); Log_Dec(idle);
+    Log_Str(" r1=");  Log_Dec(io_rel);
+    Log_Str(" r100="); Log_Dec(io_hold);
+    Log_Str(" ck r1="); Log_Dec(ck_rel);
+    Log_Str(" r100="); Log_Dec(ck_hold);
+    Log_Str("\n");
+    SWD_ClockDiag(&a2b, &b2a);
+    Log_Str("SWD cknet PA3->PB13="); Log_Dec(a2b);
+    Log_Str(" PB13->PA3="); Log_Dec(b2a);
+    Log_Str("\n");
+
+    /* 原始监听: 看目标是否真的把 SWDIO 拉低过 (全 F = 完全没驱动) */
+    Log_Str("SWD raw pre="); Log_Hex(SWD_ListenRaw(0));
+    Log_Str(" post="); Log_Hex(SWD_ListenRaw(1));
+    Log_Str("\n");
+    /* SWDIO 自回环: 发送脚(PA4)与采样脚(PA7)是否真并在一起 (期望 echo=1) */
+    Log_Str("SWD echo="); Log_Dec(SWD_SelfEcho());
+    Log_Str("\n");
+
+    /* 组合表: 时钟脚 / SWDIO 发送 / SWDIO 采样
+     *   c0 文档接法 (PA3 时钟, PA4 发, PA7 采)
+     *   c1 备用时钟 PB13
+     *   c2 SWDIO 收发对调
+     *   c3 SWCLK 与 SWDIO 对调 (排查四针口标反)
+     *   c4 SWCLK 与 SWDIO 全对调
+     *   c5 PB13 时钟 + SWDIO 对调                                    */
+    {
+        typedef struct {
+            GPIO_TypeDef *clk; uint16_t clk_pin;
+            GPIO_TypeDef *dop; uint16_t do_pin;
+            GPIO_TypeDef *dip; uint16_t di_pin;
+        } pin_cfg_t;
+        static const pin_cfg_t cfg[6] = {
+            { SWCLK_GPIO,       SWCLK_PIN,       SWDIO_OUT_GPIO, SWDIO_OUT_PIN, SWDIO_IN_GPIO,  SWDIO_IN_PIN  },
+            { SWD_CLK_ALT_GPIO, SWD_CLK_ALT_PIN, SWDIO_OUT_GPIO, SWDIO_OUT_PIN, SWDIO_IN_GPIO,  SWDIO_IN_PIN  },
+            { SWCLK_GPIO,       SWCLK_PIN,       SWDIO_IN_GPIO,  SWDIO_IN_PIN,  SWDIO_OUT_GPIO, SWDIO_OUT_PIN },
+            { SWDIO_OUT_GPIO,   SWDIO_OUT_PIN,   SWCLK_GPIO,     SWCLK_PIN,     SWDIO_IN_GPIO,  SWDIO_IN_PIN  },
+            { SWDIO_OUT_GPIO,   SWDIO_OUT_PIN,   SWDIO_IN_GPIO,  SWDIO_IN_PIN,  SWCLK_GPIO,     SWCLK_PIN     },
+            { SWD_CLK_ALT_GPIO, SWD_CLK_ALT_PIN, SWDIO_IN_GPIO,  SWDIO_IN_PIN,  SWDIO_OUT_GPIO, SWDIO_OUT_PIN },
+        };
+        static const uint32_t sp[2] = { 200u, 1000u };
+
+        for (c = 0; c < 6u; c++) {
+            SWD_SetDioPins(cfg[c].dop, cfg[c].do_pin, cfg[c].dip, cfg[c].di_pin);
+            SWD_SetClockPin(cfg[c].clk, cfg[c].clk_pin);
+            for (i = 0; i < 2u; i++) {
+                SWD_SetSpeed(sp[i]);
+                v = 0;
+                r = SWD_Connect(&v);
+                Log_Str("SWD c"); Log_Dec(c);
+                Log_Str(" s"); Log_Dec(i);
+                Log_Str(" r="); Log_Dec(r);
+                Log_Str(" a="); Log_Dec(g_swd_dbg_ack);
+                Log_Str(" d="); Log_Hex(v);
+                Log_Str("\n");
+                if (r == SWD_OK) break;
+            }
+            if (r == SWD_OK) break;
+        }
+    }
+    SWD_SetSpeed(SWD_DELAY_LOOP);
+    SWD_SetClockPin(SWCLK_GPIO, SWCLK_PIN);
+    SWD_SetDioPins(SWDIO_OUT_GPIO, SWDIO_OUT_PIN, SWDIO_IN_GPIO, SWDIO_IN_PIN);
+    *dpidr = v;
     g_status.swd_err = r;
-    g_status.target_dpidr = *dpidr;
+    g_status.target_dpidr = v;
     if (r == SWD_OK) {
         if (SWD_Mem_Read32(DBG_IDCODE, idcode) == SWD_OK)
             g_status.target_idcode = *idcode;
@@ -241,3 +325,4 @@ uint8_t TargetProg_Run(uint32_t *err_addr)
 
     return TP_OK;
 }
+#endif

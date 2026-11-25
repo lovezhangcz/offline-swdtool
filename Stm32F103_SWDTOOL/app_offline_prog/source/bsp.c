@@ -27,6 +27,12 @@ void BSP_Init(void)
     RCC->APB2ENR |= RCC_APB2ENR_IOPAEN | RCC_APB2ENR_IOPBEN |
                     RCC_APB2ENR_AFIOEN;
 
+#if BOARD_DISABLE_JTAG
+    /* 新主板: SWDIO=PB4(NJTRST)、USB 上拉=PA15(JTDI) 与 JTAG 复用。
+     * SWJ_CFG=010: 关闭 JTAG-DP, 保留 SW-DP (PA13/PA14 仍可烧录本板)。 */
+    AFIO->MAPR = (AFIO->MAPR & ~(7u << 24)) | (2u << 24);
+#endif
+
     /* LED: PB12 推挽输出 2MHz (MODE=10 CNF=00 -> 0x2), 初始熄灭 */
     BSP_PinConfig(LED_GPIO, LED_PIN, 0x2u);
     LED_OFF();

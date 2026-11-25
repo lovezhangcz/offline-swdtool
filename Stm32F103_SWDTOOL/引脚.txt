@@ -3,3 +3,7 @@ PA3    outclk
 PA4    outdio
 PA12/PA11 USB
 PA9  USB上拉
+
+
+SWCLK	PA3（13 脚）默认输出；PB13（26 脚）备用	接 PA14 / SWCLK。只允许一个时钟脚驱动。
+SWDIO	PA4（14 脚）发送；PA7（17 脚）采样	两条内部路径共用接口的一根线，接 PA13 / SWDIO。

@@ -1,3 +1,4 @@
+#if !defined(BUILD_BOOT)
 /* 由 tools/flm2blob.py 自动生成, 请勿手改
  * 来源: GD32F1x0_64.FLM
  * 设备: GD32F1x0 64KB  flash=0x08000000+0x10000  page=1024B
@@ -5,6 +6,7 @@
  *
  * L1优化: 仅在 TARGET_CHIP == TARGET_CHIP_GD32F1X0 时编译, 节省 Flash
  */
+#include "board.h"          /* TARGET_CHIP 选择 */
 #include "flash_blob.h"
 
 #if TARGET_CHIP == TARGET_CHIP_GD32F1X0
@@ -43,3 +45,4 @@ const flash_algo_t FLASH_ALGO_GD32F1X0 = {
 };
 
 #endif /* TARGET_CHIP == TARGET_CHIP_GD32F1X0 */
+#endif

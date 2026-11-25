@@ -75,21 +75,24 @@
 #define BTAB_RX_ADDR(ep)    PMA_U16((ep) * 8u + 4u)
 #define BTAB_RX_CNT(ep)     PMA_U16((ep) * 8u + 6u)
 
-/* ---- PMA 缓冲区布局 (按 USB_MODE 切换) ---- */
+/* ---- PMA 缓冲区布局 (按功能裁剪 / 按 USB_MODE 切换) ---- */
 #define EP0_TX_BUF   0x040u
 #define EP0_RX_BUF   0x080u
 
-#if USB_MODE == USB_MODE_CDC
-  #define EP1_TX_BUF   0x0C0u   /* 16B interrupt IN */
-  #define EP2_RX_BUF   0x0D0u   /* 64B bulk OUT */
-  #define EP3_TX_BUF   0x110u   /* 64B bulk IN  */
-  #define BULK_RX_BUF  EP2_RX_BUF
-  #define BULK_TX_BUF  EP3_TX_BUF
-#else /* USB_MODE_MSC */
-  #define EP1_RX_BUF   0x0C0u   /* 64B bulk OUT */
-  #define EP2_TX_BUF   0x100u   /* 64B bulk IN  */
-  #define BULK_RX_BUF  EP1_RX_BUF
-  #define BULK_TX_BUF  EP2_TX_BUF
+#if USB_HAS_CDC
+  #define EP_CDC_NOTIFY_TX  0x0C0u   /* 16B interrupt IN */
+  #define EP_CDC_OUT_RX     0x0D0u   /* 64B bulk OUT */
+  #define EP_CDC_IN_TX      0x110u   /* 64B bulk IN  */
+#endif
+
+#if USB_HAS_MSC
+  #if USB_MODE == USB_MODE_MSC
+    #define EP_MSC_OUT_RX   0x0C0u   /* 64B bulk OUT */
+    #define EP_MSC_IN_TX    0x100u   /* 64B bulk IN  */
+  #else /* 复合模式: 放在 CDC 之后 */
+    #define EP_MSC_OUT_RX   0x150u   /* 64B bulk OUT */
+    #define EP_MSC_IN_TX    0x190u   /* 64B bulk IN  */
+  #endif
 #endif
 
 /* RX 缓冲尺寸描述: 64B -> BL_SIZE=1, NUM_BLOCK=2 */
@@ -198,20 +201,26 @@ static void usb_endpoints_reset(void)
     /* 总线复位后: 重新配置全部端点, 等待主机重新枚举 */
     USB_EP_Config(USB_EP0, EP_TYPE_CONTROL,   EP0_RX_BUF,  RXSIZE_64, EP0_TX_BUF);
 
-#if USB_MODE == USB_MODE_CDC
-    USB_EP_Config(USB_EP1, EP_TYPE_INTERRUPT, 0,           RXSIZE_16, EP1_TX_BUF);
-    USB_EP_Config(USB_EP2, EP_TYPE_BULK,      EP2_RX_BUF,  RXSIZE_64, 0);
-    USB_EP_Config(USB_EP3, EP_TYPE_BULK,      0,           RXSIZE_16, EP3_TX_BUF);
-#else /* USB_MODE_MSC */
-    USB_EP_Config(USB_BULK_OUT_EP, EP_TYPE_BULK, BULK_RX_BUF, RXSIZE_64, 0);
-    USB_EP_Config(USB_BULK_IN_EP,  EP_TYPE_BULK, 0,          RXSIZE_16, BULK_TX_BUF);
+#if USB_HAS_CDC
+    USB_EP_Config(USB_CDC_NOTIFY_EP, EP_TYPE_INTERRUPT, 0, RXSIZE_16, EP_CDC_NOTIFY_TX);
+    USB_EP_Config(USB_CDC_OUT_EP,    EP_TYPE_BULK, EP_CDC_OUT_RX, RXSIZE_64, 0);
+    USB_EP_Config(USB_CDC_IN_EP,     EP_TYPE_BULK, 0, RXSIZE_16, EP_CDC_IN_TX);
+#endif
+#if USB_HAS_MSC
+    USB_EP_Config(USB_BULK_OUT_EP,   EP_TYPE_BULK, EP_MSC_OUT_RX, RXSIZE_64, 0);
+    USB_EP_Config(USB_BULK_IN_EP,    EP_TYPE_BULK, 0, RXSIZE_16, EP_MSC_IN_TX);
 #endif
 
     /* EP0: RX VALID 准备接收 SETUP, TX NAK */
     USB_EP_SetRxStatus(USB_EP0, USB_STAT_VALID);
     USB_EP_SetTxStatus(USB_EP0, USB_STAT_NAK);
     /* 批量 OUT 端点打开接收 */
+#if USB_HAS_CDC
+    USB_EP_SetRxStatus(USB_CDC_OUT_EP, USB_STAT_VALID);
+#endif
+#if USB_HAS_MSC
     USB_EP_SetRxStatus(USB_BULK_OUT_EP, USB_STAT_VALID);
+#endif
 
     USB_SetAddress(0);
     USB_CB_Reset();
@@ -284,24 +293,18 @@ void USB_LP_CAN1_RX0_IRQHandler(void)
                     USB_EP_ClearTxCTR(USB_EP0);
                     USB_CB_EP0_TxDone();
                 }
-            } else if (ep == USB_BULK_OUT_EP) {
-                if (r & EPR_CTR_RX) {
-                    uint16_t cnt = USB_EP_GetRxCount(USB_BULK_OUT_EP);
-                    uint8_t buf[64];
-                    USB_PMA_Read(USB_EP_GetRxAddr(USB_BULK_OUT_EP), buf, cnt);
-                    USB_EP_ClearRxCTR(USB_BULK_OUT_EP);
-                    USB_CB_BulkOut(buf, cnt);
-                    USB_EP_SetRxStatus(USB_BULK_OUT_EP, USB_STAT_VALID);
-                }
-            } else if (ep == USB_BULK_IN_EP) {
-                if (r & EPR_CTR_TX) {
-                    USB_EP_ClearTxCTR(USB_BULK_IN_EP);
-                    USB_CB_BulkInDone();
-                }
+            } else if (r & EPR_CTR_RX) {
+                uint16_t cnt = USB_EP_GetRxCount(ep);
+                uint8_t buf[64];
+                USB_PMA_Read(USB_EP_GetRxAddr(ep), buf, cnt);
+                USB_EP_ClearRxCTR(ep);
+                USB_CB_BulkOut(ep, buf, cnt);
+                USB_EP_SetRxStatus(ep, USB_STAT_VALID);
+            } else if (r & EPR_CTR_TX) {
+                /* 批量 IN 发送完成 (CDC 通知端点不发数据, 由上层忽略) */
+                USB_EP_ClearTxCTR(ep);
+                USB_CB_BulkInDone(ep);
             }
-#if USB_MODE == USB_MODE_CDC
-            /* EP1 (CDC 中断通知) 不发送数据, 忽略 TX 完成 */
-#endif
             continue;
         }
         /* 其余未使能的标志不会置位; 防御性清除可写位 */
