@@ -49,6 +49,7 @@ prog_status_t g_status;
 
 static uint8_t s_attached;      /* 目标当前是否在线 */
 static uint8_t s_state;
+static uint32_t s_done_crc;     /* 最近一次烧录用到的镜像 CRC32 */
 
 /* ---------------- 异常处理: 跑飞后自动回 boot ---------------- */
 /* 应用启动后若发生硬件异常, 唯一的自救通道是 USB 升级, 所以置"进 boot"标记后复位。
@@ -112,6 +113,9 @@ static void do_program(void)
     g_status.progress = 0;
 
     r = TargetProg_Run(&err_addr);
+
+    /* 记录本次烧录对应的镜像, 供"U盘换固件后重烧"判断 */
+    s_done_crc = Storage_ImageValid() ? Storage_Header()->crc32 : 0u;
 
     SWD_GPIO_Release();
     g_status.last_error = ((uint32_t)r) | (err_addr ? (err_addr & 0xFFFFFF00u) : 0u);
@@ -238,6 +242,11 @@ int main(void)
                 SWD_GPIO_Release();
             }
         } else if ((s_state == ST_DONE_WAIT || s_state == ST_FAIL_WAIT) && s_attached) {
+            /* U 盘里换了新固件 (CRC 变化): 目标仍在线也重新烧录 */
+            if (Storage_ImageValid() && Storage_Header()->crc32 != s_done_crc) {
+                do_program();
+                continue;
+            }
             if (TargetProg_Detect() == TP_OK) {
                 SWD_GPIO_Release();         /* 目标仍在线, 保持等待 */
             } else {

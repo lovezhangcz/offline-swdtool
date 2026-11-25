@@ -9,14 +9,14 @@
   *     - 不假设固定簇映射: Windows 把文件放哪个簇, 我们就记哪个簇
   *     - 写入时: 数据按簇号原样存到 Flash, 从根目录提取文件名/大小/首簇
   *     - 读回时: 用保存的首簇和大小构造 FAT 链, 数据从原簇号位置读出
-  *     - 支持最长 20 字节文件名 (通过 LFN 长文件名项显示)
+  *     - 支持最长 64 字节文件名 (通过 LFN 长文件名项显示)
   *     - 只识别 .bin 扩展名文件, 多个 bin 取第一个
   *
   *   存储布局 (内部 Flash):
   *     第 0 页 (1KB):
   *       偏移  0-31 : 镜像头 (img_hdr_t, 32字节)
-  *       偏移 32-51 : 文件名 (20字节)
-  *       偏移 52-53 : 首簇号 (uint16_t, 小端)
+  *       偏移 32-95 : 文件名 (64字节)
+  *       偏移 96-97 : 首簇号 (uint16_t, 小端)
   *     第 1 页起:      数据区 (按磁盘簇号存放, 与虚拟磁盘布局一致)
   *
   *   磁盘布局 (虚拟 FAT12):
@@ -54,12 +54,29 @@
 /* 数据在存储区中的物理起始偏移 (第 0 页给头) */
 #define VFS_DATA_OFFSET       FLASH_PAGE_SIZE
 
-/* 文件名存在第 0 页偏移 32 处, 最长 20 字节 (ASCII) */
+/* 文件名存在第 0 页偏移 32 处, 最长 64 字节 (对应 FAT 最长 5 个 LFN 项) */
 #define FW_NAME_OFFSET        32u
-#define FW_NAME_LEN           20u
+#define FW_NAME_LEN           64u
 
-/* 首簇号存在第 0 页偏移 52 处 (uint16_t, 小端) */
-#define FW_FIRST_CLUSTER_OFFSET  52u
+/* 首簇号存在第 0 页偏移 32+64=96 处 (uint16_t, 小端) */
+#define FW_FIRST_CLUSTER_OFFSET  (FW_NAME_OFFSET + FW_NAME_LEN)
+
+/* README.TXT: 常驻只读文件, 占数据区最后一个簇 (内容由 read_data_cluster 合成,
+ * 不占用 Flash)。作用是让这个虚拟 U 盘能被识别: 空盘时也有指纹文件,
+ * 上位机 (boot_flash.py msc) 就是靠它找到盘符的。 */
+#define VFS_README_CLUSTER    (VFS_FIRST_CLUSTER + VFS_DATA_CLUSTERS - 1u)
+static const char vfs_readme_text[] =
+    "SWD Offline Programmer\r\n"
+    "======================\r\n"
+    "\r\n"
+    "1. Copy ONE target firmware (*.bin) to this drive.\r\n"
+    "2. Max size about 14 KB (one file only).\r\n"
+    "3. The target chip is erased, programmed, verified\r\n"
+    "   and reset automatically.\r\n"
+    "\r\n"
+    "LED: solid = OK, 3 short blinks = FAIL.\r\n"
+    "The file name is kept and shown after re-plug.\r\n";
+#define VFS_README_SIZE       ((uint32_t)(sizeof(vfs_readme_text) - 1u))
 
 /* ---- 静态数据 ---- */
 
@@ -252,9 +269,13 @@ static uint8_t build_lfn_entries(uint8_t *buf, const uint8_t *name, uint8_t name
     uint16_t unicode_buf[13];
     uint8_t entry_idx;
 
-    n_entries = (name_len + 12) / 13;
+    n_entries = (uint8_t)((name_len + 12) / 13);
     if (n_entries == 0) n_entries = 1;
-    if (n_entries > 2) n_entries = 2;
+    {
+        /* 64 字节文件名最多用 5 个 LFN 项 */
+        uint8_t max_entries = (uint8_t)((FW_NAME_LEN + 12u) / 13u);
+        if (n_entries > max_entries) n_entries = max_entries;
+    }
 
     entry_idx = 0;
     for (e = n_entries; e >= 1; e--) {
@@ -337,8 +358,21 @@ static void read_fat(uint8_t *buf)
     buf[1] = 0xFF;
     buf[2] = 0x0F;
 
+    /* README.TXT 固定占用最后一个簇 (单簇文件), 让主机不要把它分配给固件 */
+    {
+        uint16_t c   = VFS_README_CLUSTER;
+        uint16_t off = (uint16_t)(c + (c >> 1));
+        if (c & 1u) {
+            buf[off]     = (uint8_t)((buf[off] & 0x0Fu) | 0xF0u);
+            buf[off + 1] = 0xFFu;
+        } else {
+            buf[off]     = 0xFFu;
+            buf[off + 1] = (uint8_t)((buf[off + 1] & 0xF0u) | 0x0Fu);
+        }
+    }
+
     if (!Storage_ImageValid() || Storage_Header()->length == 0) {
-        return;  /* 无固件, FAT 全 0 (空闲) */
+        return;  /* 无固件, 数据簇全空闲 */
     }
 
     fw_size = Storage_Header()->length;
@@ -347,9 +381,12 @@ static void read_fat(uint8_t *buf)
     if (fw_clusters == 0) fw_clusters = 1;
     if (fw_clusters > VFS_DATA_CLUSTERS) fw_clusters = (uint16_t)VFS_DATA_CLUSTERS;
 
-    /* 安全检查: 首簇 + 链长 不超过总簇数 */
+    /* 安全检查: 首簇 + 链长 不超过总簇数, 且不能占用 README 所在簇 */
     if (first_cluster + fw_clusters > VFS_FIRST_CLUSTER + VFS_DATA_CLUSTERS) {
         fw_clusters = (uint16_t)(VFS_FIRST_CLUSTER + VFS_DATA_CLUSTERS - first_cluster);
+    }
+    if (first_cluster + fw_clusters > VFS_README_CLUSTER) {
+        fw_clusters = (uint16_t)(VFS_README_CLUSTER - first_cluster);
     }
 
     /* 构造连续簇链 (假设文件连续存放 - Windows 小文件通常连续分配) */
@@ -374,17 +411,30 @@ static void read_fat(uint8_t *buf)
 
 static void read_rootdir(uint8_t *buf)
 {
+    static const uint8_t rd_name[11] = {
+        'R','E','A','D','M','E',' ',' ','T','X','T'
+    };
+    uint8_t  fw_name[FW_NAME_LEN];
+    uint8_t  name_len;
+    uint8_t  short_name[11];
+    uint32_t fw_size;
+    uint16_t first_cluster;
+    uint8_t *pos = buf;
+
     memset(buf, 0, VFS_SECTOR_SIZE);
 
+    /* README.TXT 常驻根目录 (只读), 保证空盘时也能被识别 */
+    make_dir_entry(buf, rd_name, 0x01u, 0x4B00u, 0x5421u,
+                   (uint16_t)VFS_README_CLUSTER, VFS_README_SIZE);
+    pos += 32;
+
     if (!Storage_ImageValid() || Storage_Header()->length == 0) {
-        return;  /* 无固件, 根目录为空 */
+        return;  /* 无固件: 根目录只有 README.TXT */
     }
 
-    uint8_t fw_name[FW_NAME_LEN];
-    uint8_t name_len = fw_get_saved_name(fw_name);
-    uint8_t short_name[11];
-    uint32_t fw_size = Storage_Header()->length;
-    uint16_t first_cluster = fw_get_saved_first_cluster();
+    name_len = fw_get_saved_name(fw_name);
+    fw_size = Storage_Header()->length;
+    first_cluster = fw_get_saved_first_cluster();
 
     if (name_len == 0) {
         static const uint8_t def_name[11] = {
@@ -394,8 +444,6 @@ static void read_rootdir(uint8_t *buf)
     } else {
         make_short_name(fw_name, name_len, short_name);
     }
-
-    uint8_t *pos = buf;
 
     /* LFN 项 (显示完整原名) */
     if (name_len > 0) {
@@ -419,6 +467,14 @@ static void read_data_cluster(uint8_t *buf, uint16_t cluster)
 
     if (cluster < VFS_FIRST_CLUSTER) return;
     if (cluster >= VFS_FIRST_CLUSTER + VFS_DATA_CLUSTERS) return;
+
+    /* README.TXT 常驻: 内容现造, 不读 Flash */
+    if (cluster == VFS_README_CLUSTER) {
+        uint32_t n = VFS_README_SIZE;
+        if (n > VFS_SECTOR_SIZE) n = VFS_SECTOR_SIZE;
+        memcpy(buf, vfs_readme_text, n);
+        return;
+    }
 
     /* 数据按簇号存放在 Flash 中: 物理偏移 = 第1页起 + (cluster - 2) * 512 */
     uint32_t rel_cluster = cluster - VFS_FIRST_CLUSTER;
@@ -537,7 +593,8 @@ static void parse_rootdir_for_fw(const uint8_t *rootdir)
             uint8_t n = lfn_extract_chars(entry, tmp, 13);
             uint8_t start = (uint8_t)((ord - 1u) * 13u);
 
-            if (ord >= 1u && ord <= 2u && start < FW_NAME_LEN && n > 0) {
+            if (ord >= 1u && ord <= ((FW_NAME_LEN + 12u) / 13u) &&
+                start < FW_NAME_LEN && n > 0) {
                 uint8_t copy = n;
                 uint8_t end;
                 if (copy > FW_NAME_LEN - start) copy = (uint8_t)(FW_NAME_LEN - start);
@@ -623,9 +680,9 @@ static void vfs_update_header(void)
     }
     crc ^= 0xFFFFFFFFu;
 
-    /* 构造镜像头 (32 字节) */
-    uint8_t hdr_buf[64];
-    memset(hdr_buf, 0xFF, 64);
+    /* 构造第 0 页内容: 头(32B) + 文件名(64B) + 首簇号(2B) */
+    uint8_t hdr_buf[FW_FIRST_CLUSTER_OFFSET + 2u];
+    memset(hdr_buf, 0xFF, sizeof(hdr_buf));
 
     /* magic */
     hdr_buf[0] = (uint8_t)(IMG_MAGIC & 0xFF);
@@ -709,7 +766,31 @@ void VFS_WriteSector(uint32_t lba)
 
     /* ---- 根目录写入: 解析文件名/大小/首簇 ---- */
     if (lba == 2) {
+        uint8_t  old_name[FW_NAME_LEN];
+        uint8_t  old_len = 0;
+        uint32_t old_size = 0;
+        uint16_t old_fc = VFS_FIRST_CLUSTER;
+
+        if (Storage_ImageValid()) {
+            old_len  = fw_get_saved_name(old_name);
+            old_size = Storage_Header()->length;
+            old_fc   = fw_get_saved_first_cluster();
+        }
+
         parse_rootdir_for_fw(buf);
+
+        /* ---- 纯重命名: 大小/首簇都没变, 只是文件名改了 ----
+         * Windows 重命名只写根目录、不写数据, 也不会触发 SYNCHRONIZE CACHE
+         * 收尾, 所以这里要立即把新名字落到镜像头, 否则拔插后名字丢失。 */
+        if (!g_write_started && g_fw_found && old_size > 0 &&
+            g_fw_size == old_size && g_fw_first_cluster == old_fc) {
+            uint8_t nl = 0;
+            while (nl < FW_NAME_LEN && g_fw_name[nl] != 0) nl++;
+            if (nl != old_len || memcmp(g_fw_name, old_name, nl) != 0) {
+                g_header_written = 0;      /* 允许重写镜像头 */
+                vfs_update_header();
+            }
+        }
         return;
     }
 
@@ -725,6 +806,9 @@ void VFS_WriteSector(uint32_t lba)
 
     if (cluster < VFS_FIRST_CLUSTER) return;
     if (cluster >= VFS_FIRST_CLUSTER + VFS_DATA_CLUSTERS) return;
+
+    /* README.TXT 只读: 丢弃对它的写入 */
+    if (cluster == VFS_README_CLUSTER) return;
 
     uint32_t rel_cluster = cluster - VFS_FIRST_CLUSTER;
     uint32_t store_offset = VFS_DATA_OFFSET + rel_cluster * VFS_SECTOR_SIZE;

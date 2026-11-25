@@ -47,7 +47,7 @@ SERIAL_PIDS = (PID_CDC, PID_COMP)
 APP_BASE = 0x08004000
 CHUNK = 512
 BOOT_WAIT = 12.0
-MSC_MAX_PAYLOAD = 16 * 1024 - 1024   # 镜像区 16K, 第 0 页留头/目录, 剩 30 簇 = 15360
+MSC_MAX_PAYLOAD = 29 * 512          # 镜像区 16K: 30 个数据簇, 最后 1 簇固定给 README.TXT
 
 HDR = b"\xAA\x55"
 CMD_PING = 0x01
