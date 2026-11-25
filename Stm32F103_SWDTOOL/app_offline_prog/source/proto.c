@@ -38,6 +38,7 @@
 #define CMD_STRM_END    0x32u
 #define CMD_TGT_ERASE   0x33u
 #define CMD_TGT_READ    0x34u
+#define CMD_TGT_DETECT  0x35u
 
 #define RSP_OK          0x00u
 #define RSP_ERR_ARG     0x01u
