@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 USB 调试闭环工具: 通过 boot 升级应用 + 抓诊断日志
@@ -14,8 +14,10 @@ USB 调试闭环工具: 通过 boot 升级应用 + 抓诊断日志
     python boot_flash.py log                   # 拉取应用诊断日志
     python boot_flash.py probe [秒数]         # SWD 握手: 读目标 DPIDR/IDCODE; 给秒数则连续重试
     python boot_flash.py tgt   <bin|hex>      # 上传镜像并用 SWD 烧进目标芯片, 完成后复位运行
-    python boot_flash.py strm  <bin|hex>      # 流式烧录: 分包直达目标 Flash, 不受本机 15KB 镜像区限制
+    python boot_flash.py strm  <bin|hex>      # 流式烧录: 分包直达目标 Flash, 不受本机 36KB 镜像区限制
     python boot_flash.py erase                # 整片擦除目标芯片, 并校验首末字为空白
+    python boot_flash.py fsize                # 本机 Flash 实际容量自检 (64KB/128KB 之上实测)
+    python boot_flash.py clear                # 删除烧录器内的目标固件 (之后不再自动烧录)
     python boot_flash.py clk [0]              # 示波器测试: SWCLK/SWDIO 持续方波 (0=停止)
     python boot_flash.py ports                 # 列出可用串口
 
@@ -47,16 +49,17 @@ PID_CDC = 0x5740        # 单功能 CDC (boot 也是这个)
 PID_MSC = 0x5741        # 单功能 MSC (无串口, 不会出现在 COM 列表)
 PID_COMP = 0x5742       # 复合设备 MSC+CDC (APP_MSC 调试版)
 SERIAL_PIDS = (PID_CDC, PID_COMP)
-APP_BASE = 0x08004000
-APP_SIZE = 32 * 1024        # APP 区 0x08004000~0x0800BFFF
+APP_BASE = 0x08001800
+APP_SIZE = 20 * 1024        # APP 区 0x08001800~0x080067FF
 CHUNK = 512
 BOOT_WAIT = 12.0
-MSC_MAX_PAYLOAD = 29 * 512          # 镜像区 16K: 30 个数据簇, 最后 1 簇固定给 README.TXT
+MSC_MAX_PAYLOAD = 71 * 512          # 镜像区 37K: 72 个数据簇, 最后 1 簇固定给 README.TXT
 
 HDR = b"\xAA\x55"
 CMD_PING = 0x01
 CMD_GET_INFO = 0x02
 CMD_GET_VERSION = 0x03
+CMD_IMG_CLEAR = 0x13
 CMD_IMG_BEGIN = 0x10
 CMD_IMG_DATA = 0x11
 CMD_IMG_END = 0x12
@@ -66,6 +69,7 @@ CMD_TGT_PROBE = 0x22
 CMD_REBOOT_BOOT = 0x23
 CMD_LOG_POLL = 0x24
 CMD_CLK_TEST = 0x25
+CMD_FLASH_TEST = 0x26
 CMD_STRM_BEGIN = 0x30
 CMD_STRM_DATA = 0x31
 CMD_STRM_END = 0x32
@@ -212,13 +216,16 @@ class AppLink:
         return "".join(out)
 
     def info(self):
-        """返回镜像/状态: valid, length, crc32, load, capacity, state, result"""
+        """返回镜像/状态: valid, length, crc32, load, capacity, state, result, flash_kb"""
         st, pl = self.cmd(CMD_GET_INFO)
         if st != 0 or len(pl) < 19:
             raise RuntimeError("GET_INFO 失败 status=%d len=%d" % (st, len(pl)))
         length, crc, load, cap = struct.unpack("<IIII", pl[1:17])
+        fkb = struct.unpack("<I", pl[19:23])[0] if len(pl) >= 23 else 0
+        if not pl[0]:                 # 无镜像时头区是空白, 字段无意义
+            length = crc = load = 0
         return dict(valid=pl[0], length=length, crc32=crc, load=load,
-                    capacity=cap, state=pl[17], result=pl[18])
+                    capacity=cap, state=pl[17], result=pl[18], flash_kb=fkb)
 
     def reboot_to_boot(self):
         try:
@@ -235,9 +242,12 @@ class AppLink:
         return dict(status=pl[0], dpidr=dpidr, idcode=idcode)
 
     # ---------------- 目标芯片烧录 (镜像上传 + 触发) ----------------
-    def img_begin(self, length, crc, load=TGT_LOAD_ADDR):
-        st, _ = self.cmd(CMD_IMG_BEGIN, struct.pack("<III", length, crc, load),
-                         timeout=6.0)
+    def img_begin(self, length, crc, load=TGT_LOAD_ADDR, name=b""):
+        """name: 可选文件名, 设备存入镜像头, 使 U 盘里显示同样的名字"""
+        pl = struct.pack("<III", length, crc, load)
+        if name:
+            pl += name[:63]
+        st, _ = self.cmd(CMD_IMG_BEGIN, pl, timeout=6.0)
         if st != 0:
             raise RuntimeError("IMG_BEGIN 失败 status=%d" % st)
 
@@ -294,12 +304,25 @@ class AppLink:
             raise RuntimeError("STRM_END 失败 status=%d" % st)
         return dict(status=pl[0], err=struct.unpack("<I", pl[1:5])[0])
 
+    def img_clear(self, timeout=5.0):
+        """删除烧录器内的目标固件镜像; 之后不会再对目标自动烧录"""
+        st, _ = self.cmd(CMD_IMG_CLEAR, timeout=timeout)
+        if st != 0:
+            raise RuntimeError("IMG_CLEAR 失败 status=%d" % st)
+
     def tgt_erase(self, timeout=30.0):
         """整片擦除目标芯片, 返回 status(TP_xxx) 与目标 Flash 容量(KB)"""
         st, pl = self.cmd(CMD_TGT_ERASE, timeout=timeout)
         if st != 0 or len(pl) < 5:
             raise RuntimeError("TGT_ERASE 失败 status=%d" % st)
         return dict(status=pl[0], flash_kb=struct.unpack("<I", pl[1:5])[0])
+
+    def flash_test(self, timeout=10.0):
+        """本机 Flash 实际容量自检: 芯片自报 KB + 64KB/128KB 之上页的擦写结果"""
+        st, pl = self.cmd(CMD_FLASH_TEST, timeout=timeout)
+        if st != 0 or len(pl) < 3:
+            raise RuntimeError("FLASH_TEST 失败 status=%d" % st)
+        return dict(reported=pl[0], at64=pl[1], at128=pl[2])
 
 
 # ------------------------------------------------------------------ boot 侧 --
@@ -663,8 +686,8 @@ def do_tgt(dev, bin_path):
         raise RuntimeError("固件为空: %s" % bin_path)
     if (load_addr & 0xFF000000) != 0x08000000:
         raise RuntimeError("固件起始地址 0x%08X 不在 0x08xxxxxx" % load_addr)
-    if len(data) > 15 * 1024:
-        raise RuntimeError("固件 %d 字节超出镜像区可用空间 (~15KB)" % len(data))
+    if len(data) > 36 * 1024:
+        raise RuntimeError("固件 %d 字节超出镜像区可用空间 (~36KB, 更大请用流式烧录)" % len(data))
 
     crc = zlib.crc32(data) & 0xFFFFFFFF
     print("[tgt] %s: %d 字节 CRC32=%08X -> 0x%08X"
@@ -676,7 +699,10 @@ def do_tgt(dev, bin_path):
         return 3
 
     t0 = time.time()
-    app.img_begin(len(data), crc, load_addr)
+    # 文件名改为 .bin, 与 U 盘写入方式一致 (U 盘里看到的就是原始文件名)
+    fw_name = os.path.splitext(os.path.basename(bin_path))[0] + ".bin"
+    fw_name = fw_name.encode("ascii", "replace").replace(b"?", b"_")
+    app.img_begin(len(data), crc, load_addr, fw_name)
 
     off = 0
     while off < len(data):
@@ -762,6 +788,49 @@ def do_erase(dev):
         print("[app] 日志:")
         for ln in logs.splitlines():
             print("   ", ln)
+    app.close()
+    return 0
+
+
+def do_clear(dev):
+    """删除烧录器内保存的目标固件镜像 (之后不会再自动烧录)"""
+    app = try_app(dev, 1.5)
+    if app is None:
+        print("设备不在应用模式, 先执行: python boot_flash.py run")
+        return 3
+    m = app.info()
+    if not m["valid"]:
+        print("[clear] 烧录器里本来就没有固件")
+        app.close()
+        return 0
+    print("[clear] 当前镜像: %d 字节 crc=%08X -> 删除" % (m["length"], m["crc32"]))
+    app.img_clear()
+    time.sleep(0.3)
+    m = app.info()
+    if m["valid"]:
+        raise RuntimeError("清除后镜像仍然有效")
+    print("[clear] 已删除, 当前状态: valid=0 state=%d (不会再对目标烧录)" % m["state"])
+    app.close()
+    return 0
+
+
+def do_fsize(dev):
+    """查本机 Flash 实际容量: 芯片自报值 + 64KB/128KB 之上页的真实擦写结果"""
+    app = try_app(dev, 1.5)
+    if app is None:
+        print("设备不在应用模式, 先执行: python boot_flash.py run")
+        return 3
+    r = app.flash_test()
+    names = {0: "OK", 1: "解锁/擦除失败", 2: "编程失败", 3: "回读不一致", 4: "该页不存在"}
+    print("[fsize] 芯片自报 F_SIZE: %d KB" % r["reported"])
+    print("[fsize] 0x08010000 (64KB 之上) 擦写: %s" % names.get(r["at64"], r["at64"]))
+    print("[fsize] 0x08020000 (128KB 之上) 擦写: %s" % names.get(r["at128"], r["at128"]))
+    if r["at64"] == 0 and r["at128"] == 0:
+        print("[fsize] 结论: 实际可用 Flash >= 256KB")
+    elif r["at64"] == 0:
+        print("[fsize] 结论: 实际可用 Flash >= 128KB (自报 %dKB 不可信)" % r["reported"])
+    else:
+        print("[fsize] 结论: 实际可用 Flash = 64KB")
     app.close()
     return 0
 
@@ -924,9 +993,9 @@ def main():
             try:
                 m = app.info()
                 print("[app] 镜像: valid=%d len=%d crc=%08X load=0x%08X cap=%d "
-                      "state=%d result=%d"
+                      "state=%d result=%d 本机Flash自报=%dKB"
                       % (m["valid"], m["length"], m["crc32"], m["load"],
-                         m["capacity"], m["state"], m["result"]))
+                         m["capacity"], m["state"], m["result"], m["flash_kb"]))
             except Exception as e:
                 print("[app] 镜像信息读取失败:", e)
             logs = app.logs()
@@ -1030,6 +1099,12 @@ def main():
 
     if cmd == "erase":
         return do_erase(dev)
+
+    if cmd == "fsize":
+        return do_fsize(dev)
+
+    if cmd == "clear":
+        return do_clear(dev)
 
     if cmd == "clk":
         # 示波器测试: 开启/关闭 SWCLK(PA3)/SWDIO(PA4) 持续方波

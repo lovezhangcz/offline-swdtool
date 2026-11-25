@@ -34,5 +34,6 @@ uint8_t  Storage_Write(uint32_t offset, const uint8_t *data, uint32_t len);
 /* 取镜像载荷起始地址/指针 */
 uint32_t        Storage_PayloadAddr(void);
 const uint8_t  *Storage_PayloadPtr(void);
+void            Storage_SetImageName(const char *name, uint32_t len);
 
 #endif

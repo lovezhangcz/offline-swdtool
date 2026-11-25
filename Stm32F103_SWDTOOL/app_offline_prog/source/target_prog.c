@@ -105,9 +105,13 @@ uint8_t TargetProg_Detect(void)
 
 uint8_t TargetProg_Probe(uint32_t *dpidr, uint32_t *idcode)
 {
-    uint8_t r = SWD_ERR_NORESP;
-    uint8_t idle, io_rel, io_hold, ck_rel, ck_hold, a2b, b2a;
+    uint8_t r;
     uint32_t v = 0;
+
+#if DBG_TOOLS
+    /* 以下全部是排查用的诊断 (引脚电平/时钟网络/原始波形/引脚组合扫描) */
+    {
+    uint8_t idle, io_rel, io_hold, ck_rel, ck_hold, a2b, b2a;
     uint8_t i, c;
 
     SWD_PinDiag(&idle, &io_rel, &io_hold, &ck_rel, &ck_hold);
@@ -174,12 +178,17 @@ uint8_t TargetProg_Probe(uint32_t *dpidr, uint32_t *idcode)
     SWD_SetSpeed(SWD_DELAY_LOOP);
     SWD_SetClockPin(SWCLK_GPIO, SWCLK_PIN);
     SWD_SetDioPins(SWDIO_OUT_GPIO, SWDIO_OUT_PIN, SWDIO_IN_GPIO, SWDIO_IN_PIN);
+    }
+#else
+    r = SWD_Connect(&v);
+#endif
     *dpidr = v;
     g_status.swd_err = r;
     g_status.target_dpidr = v;
     if (r == SWD_OK) {
         if (SWD_Mem_Read32(DBG_IDCODE, idcode) == SWD_OK)
             g_status.target_idcode = *idcode;
+#if DBG_TOOLS
         {
             uint32_t dh = 0;
             if (SWD_Mem_Read32(0xE000EDF0u, &dh) == SWD_OK) {
@@ -202,6 +211,7 @@ uint8_t TargetProg_Probe(uint32_t *dpidr, uint32_t *idcode)
             Log_Str((o1[0] != o2[0] || o1[1] != o2[1] || o1[2] != o2[2]) ?
                     " RUN\n" : " STATIC\n");
         }
+#endif
         SWD_ReleaseNRST();
     }
     SWD_GPIO_Release();

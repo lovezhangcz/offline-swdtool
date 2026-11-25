@@ -93,6 +93,8 @@ static uint8_t flash_write_half(uint32_t addr, uint16_t hw)
 }
 
 /* ------------------------------------------------ 对外接口 --------------- */
+static uint32_t payload_offset(void);
+
 const img_hdr_t *Storage_Header(void)
 {
     return (const img_hdr_t *)IMG_STORE_ADDR;
@@ -103,6 +105,7 @@ uint8_t Storage_ImageValid(void)
     const img_hdr_t *h = Storage_Header();
     if (h->magic != IMG_MAGIC) return 0;
     if (h->length == 0 || h->length > IMG_MAX_PAYLOAD) return 0;
+    if (h->length > IMG_STORE_SIZE - IMG_DATA_OFFSET - payload_offset()) return 0;
     if (h->load_addr < 0x08000000u) return 0;
     if ((h->load_addr & 0xFF000000u) != 0x08000000u) return 0;
     return 1;
@@ -172,9 +175,43 @@ uint8_t Storage_Write(uint32_t offset, const uint8_t *data, uint32_t len)
     return r;
 }
 
+/* 第 0 页布局 (与 vfs.c 一致): 镜像头 32B + 文件名 64B + 首簇号 2B */
+#define IMG_FW_NAME_OFF           32u
+#define IMG_FW_NAME_LEN           64u
+#define IMG_FW_FIRST_CLUSTER_OFF  96u
+#define IMG_FIRST_DATA_CLUSTER    2u        /* FAT 数据区首簇, 对应载荷偏移 0 */
+
+/* CDC 上传的镜像写入文件名, 使 U 盘里看到的文件名与 U 盘写入方式一致 */
+void Storage_SetImageName(const char *name, uint32_t len)
+{
+    uint8_t  buf[IMG_FW_NAME_LEN];
+    uint32_t i;
+
+    if (len > IMG_FW_NAME_LEN - 1u) len = IMG_FW_NAME_LEN - 1u;
+    for (i = 0; i < len; i++) {
+        uint8_t c = (uint8_t)name[i];
+        buf[i] = (c >= 0x20u && c < 0x7Fu) ? c : (uint8_t)'_';   /* 非 ASCII 用 '_' 代替 */
+    }
+    while (i < IMG_FW_NAME_LEN) buf[i++] = 0u;
+    (void)Storage_Write(IMG_FW_NAME_OFF, buf, IMG_FW_NAME_LEN);
+}
+
+/* U 盘写入时文件不一定从簇 2 开始 (FAT 里有旧分配时 Windows 会往后放),
+ * 载荷起点 = (首簇号 - 2) * 512; 空白(0xFFFF) 或非法值按 0 处理 */
+static uint32_t payload_offset(void)
+{
+    uint16_t c = *(volatile const uint16_t *)(IMG_STORE_ADDR + IMG_FW_FIRST_CLUSTER_OFF);
+    uint32_t off;
+
+    if (c < IMG_FIRST_DATA_CLUSTER) return 0u;
+    off = (uint32_t)(c - IMG_FIRST_DATA_CLUSTER) * 512u;
+    if (off > IMG_STORE_SIZE - IMG_DATA_OFFSET) return 0u;
+    return off;
+}
+
 uint32_t Storage_PayloadAddr(void)
 {
-    return IMG_STORE_ADDR + IMG_DATA_OFFSET;    /* 与 VFS(U 盘) 数据区偏移一致 */
+    return IMG_STORE_ADDR + IMG_DATA_OFFSET + payload_offset();   /* 与 VFS(U 盘) 数据区偏移一致 */
 }
 
 const uint8_t *Storage_PayloadPtr(void)

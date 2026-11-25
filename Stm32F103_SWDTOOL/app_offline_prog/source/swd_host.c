@@ -103,6 +103,7 @@ static void swd_delay(void)
     while (i--) { __NOP(); }
 }
 
+#if DBG_TOOLS
 /* 引脚自检: 判断线束是否真的接到目标 (目标复位态 SWDIO/PA13 内部上拉、
  * SWCLK/PA14 内部下拉)。
  *   idle   : 采样脚带我方上拉时的电平 (只说明我方网络)
@@ -146,6 +147,7 @@ void SWD_PinDiag(uint8_t *idle, uint8_t *io_rel, uint8_t *io_hold,
     s_dir = DIR_UNK;
     swdio_in();
 }
+#endif /* DBG_TOOLS */
 
 /* 时钟基本拍: SWCLK 空闲高电平, 每个时钟是"低脉冲"(拉低->拉高),
  * 与成功参考实现一致; 目标在上升沿采样, 低相位期间数据保持稳定 */
@@ -173,6 +175,7 @@ void SWD_ReleaseNRST(void)
 #endif
 }
 
+#if DBG_TOOLS
 /* 时钟网络自检 (A 板参考文档: SWCLK 网络同时涉及 PA3(13脚) 与 PB13(26脚),
  * 两个脚经板上电阻并到四针口的 SWCLK)。互相驱动/采样, 可判断时钟网络是否通。
  * 返回 1 = 驱动脚拉低/拉高时另一脚能跟随。 */
@@ -228,7 +231,9 @@ uint8_t SWD_SelfEcho(void)
     swdio_in();
     return (uint8_t)((hi << 1) | lo);
 }
+#endif /* DBG_TOOLS */
 
+#if DBG_TOOLS
 /* 示波器时钟测试: 持续在 SWCLK(PA3) 输出方波, SWDIO(PA4) 输出更低频方波,
  * 便于用示波器确认四针口上哪根是时钟、哪根是数据。g_clk_test 由命令控制。
  * 每次只输出 ms 毫秒就返回, 让主循环还能轮询 USB (可随时发停止命令)。 */
@@ -261,6 +266,7 @@ void SWD_ClkTestBurst(uint32_t ms)
     s_dir = DIR_UNK;
     swdio_in();                                    /* SWDIO 释放回输入 */
 }
+#endif /* DBG_TOOLS */
 
 void SWD_GPIO_Init(void)
 {
@@ -443,7 +449,9 @@ static uint8_t swd_select_bank(uint8_t reg)
 
 uint8_t SWD_AP_Read(uint8_t reg, uint32_t *val)
 {
-    uint8_t r = swd_select_bank(reg);
+    uint8_t r;
+    WDT_Feed();                                  /* 所有长流程最终都落到这里, 统一喂狗 */
+    r = swd_select_bank(reg);
     if (r != SWD_OK) return r;
     r = swd_transfer_retry(swd_make_req(1, 1, (uint8_t)((reg >> 2) & 3u)), val, 0);
     if (r != SWD_OK) return r;
@@ -452,7 +460,9 @@ uint8_t SWD_AP_Read(uint8_t reg, uint32_t *val)
 
 uint8_t SWD_AP_Write(uint8_t reg, uint32_t val)
 {
-    uint8_t r = swd_select_bank(reg);
+    uint8_t r;
+    WDT_Feed();                                  /* 统一喂狗 */
+    r = swd_select_bank(reg);
     if (r != SWD_OK) return r;
     return swd_transfer_retry(swd_make_req(1, 0, (uint8_t)((reg >> 2) & 3u)), &val, 1);
 }
@@ -554,6 +564,7 @@ uint8_t SWD_Mem_WriteBlock(uint32_t addr, const uint32_t *buf, uint32_t nwords)
  * 用途: 判断目标到底有没有驱动 SWDIO。
  *   全 1 (0xFFFFFFFF) => 目标从未拉低, 完全没驱动总线;
  *   出现 0            => 目标有驱动, 若 ACK 仍错则是采样相位对不齐。 */
+#if DBG_TOOLS
 uint32_t SWD_ListenRaw(uint8_t mode)
 {
     uint32_t v = 0;
@@ -584,6 +595,7 @@ uint32_t SWD_ListenRaw(uint8_t mode)
     SWDIO_L();
     return v;
 }
+#endif /* DBG_TOOLS */
 
 /* ------------------------------------------------ 连接 ------------------- */
 uint8_t SWD_Connect(uint32_t *dpidr)

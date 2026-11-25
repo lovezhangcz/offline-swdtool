@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 离线烧录器 图形上位机 (带日志)
@@ -9,9 +9,10 @@
 功能:
     串口选择/连接、设备信息、SWD 探测、读取设备日志
     固件支持 .bin 与 .hex (HEX 由上位机自动转成 BIN 后下发)
-    离线烧录 (tgt, 固件 <=15KB, 先存本机镜像区再烧目标)
+    离线烧录 (tgt, 固件 <=36KB, 先存本机镜像区再烧目标)
     流式烧录 (strm, 大小只受目标 Flash 容量限制)
     整片擦除目标芯片 (带确认, 擦完校验首末字为空白)
+    清除烧录器固件 (删除板内镜像, 之后不再自动烧录)
     U 盘模式烧录 (需主板运行 APP_MSC)
     升级主板应用 (走 boot 的 CDC 升级通道)
 
@@ -37,7 +38,7 @@ except Exception as _e:                      # pyserial 缺失等
 ROOT = os.path.dirname(os.path.abspath(__file__))
 LOG_DIR = os.path.join(ROOT, "logs")
 DEF_BIN_DIR = os.path.join(ROOT, "..", "testprj", "project", "obj")
-IMG_MAX = 15 * 1024                          # 镜像区可用上限
+IMG_MAX = 36 * 1024                          # 镜像区可用上限
 
 
 def ts():
@@ -121,12 +122,14 @@ class FlashGui:
 
         act = ttk.Frame(self.root)
         act.pack(fill="x", **pad)
-        self.btn_tgt = ttk.Button(act, text="离线烧录 (≤15KB)", command=self.on_tgt)
+        self.btn_tgt = ttk.Button(act, text="离线烧录 (≤36KB)", command=self.on_tgt)
         self.btn_tgt.pack(side="left")
         self.btn_strm = ttk.Button(act, text="流式烧录 (不限大小)", command=self.on_strm)
         self.btn_strm.pack(side="left", padx=6)
         self.btn_erase = ttk.Button(act, text="擦除目标芯片", command=self.on_erase)
         self.btn_erase.pack(side="left", padx=6)
+        self.btn_imgclr = ttk.Button(act, text="清除烧录器固件", command=self.on_img_clear)
+        self.btn_imgclr.pack(side="left", padx=6)
         self.btn_msc = ttk.Button(act, text="U盘模式烧录 (APP_MSC)", command=self.on_msc)
         self.btn_msc.pack(side="left", padx=6)
         self.btn_app = ttk.Button(act, text="升级主板应用", command=self.on_flash_app)
@@ -184,7 +187,7 @@ class FlashGui:
                      % (kind, len(data), addr), foreground="#2e7d32")
         else:
             self.lbl_bin.config(
-                text="%s  %d 字节  起始 0x%08X — 超出 15KB, 只能用流式烧录"
+                text="%s  %d 字节  起始 0x%08X — 超出 36KB, 只能用流式烧录"
                      % (kind, len(data), addr), foreground="#c62828")
 
     # ------------------------------------------------------------ 日志 ----
@@ -226,7 +229,8 @@ class FlashGui:
     def _set_buttons(self, on):
         st = "normal" if on else "disabled"
         for b in (self.btn_refresh, self.btn_conn, self.btn_probe, self.btn_dlog,
-                  self.btn_tgt, self.btn_strm, self.btn_erase, self.btn_msc, self.btn_app):
+                  self.btn_tgt, self.btn_strm, self.btn_erase, self.btn_imgclr,
+                  self.btn_msc, self.btn_app):
             b.config(state=st)
 
     def _task_finished(self, rc):
@@ -365,7 +369,7 @@ class FlashGui:
             p = self._need_bin()
             _, data = bf.load_image(p)
             if len(data) > IMG_MAX:
-                raise RuntimeError("固件 %d 字节超过 15KB, 请使用流式烧录" % len(data))
+                raise RuntimeError("固件 %d 字节超过 36KB, 请使用流式烧录" % len(data))
             return bf.do_tgt(dev, p)
         self.run_task("离线烧录 (tgt)", job)
 
@@ -384,6 +388,17 @@ class FlashGui:
         def job():
             return bf.do_erase(self._need_dev())
         self.run_task("整片擦除目标芯片", job)
+
+    def on_img_clear(self):
+        if not messagebox.askyesno(
+                "确认清除",
+                "将删除烧录器内保存的目标固件镜像。\n"
+                "删除后再次插上目标板不会被烧录。\n\n继续?"):
+            return
+
+        def job():
+            return bf.do_clear(self._need_dev())
+        self.run_task("清除烧录器固件", job)
 
     def on_msc(self):
         def job():

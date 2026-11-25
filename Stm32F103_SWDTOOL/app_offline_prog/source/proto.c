@@ -25,12 +25,14 @@
 #define CMD_IMG_BEGIN   0x10u
 #define CMD_IMG_DATA    0x11u
 #define CMD_IMG_END     0x12u
+#define CMD_IMG_CLEAR   0x13u
 #define CMD_PROG_NOW    0x20u
 #define CMD_GET_STATUS  0x21u
 #define CMD_TGT_PROBE   0x22u
 #define CMD_REBOOT_BOOT 0x23u
 #define CMD_LOG_POLL    0x24u
 #define CMD_CLK_TEST    0x25u
+#define CMD_FLASH_TEST  0x26u
 #define CMD_STRM_BEGIN  0x30u
 #define CMD_STRM_DATA   0x31u
 #define CMD_STRM_END    0x32u
@@ -103,6 +105,58 @@ static void proto_respond(uint8_t cmd, uint8_t status, const uint8_t *payload, u
     }
 }
 
+#if DBG_TOOLS
+/* ---------------- 本机 Flash 实际容量自检 (仅调试) ----------------
+   芯片自报的 F_SIZE 不可靠 (F103C8 常见 64KB 报 64 但实际 128KB),
+   所以在 64KB 之上的 1KB 页做一次 写入->回读, 用结果判定。
+   返回 0=OK, 1=解锁/擦除失败, 2=编程失败, 3=回读不一致, 4=该页不存在 */
+static uint8_t flash_wait(uint32_t ms)
+{
+    uint32_t t0 = BSP_Millis();
+    while (FLASH->SR & FLASH_SR_BSY) {          /* 地址不存在时 BSY 可能不释放, 必须超时 */
+        WDT_Feed();
+        if ((BSP_Millis() - t0) > ms) return 1;
+    }
+    return 0;
+}
+
+static uint8_t flash_page_test(uint32_t page)
+{
+    static const uint16_t pat[8] = { 0x1234u, 0x5678u, 0x9ABCu, 0xDEF0u,
+                                     0x0F1Eu, 0x2D3Cu, 0x55AAu, 0xAA55u };
+    volatile uint16_t *p = (volatile uint16_t *)page;
+    uint32_t i;
+    uint8_t  r = 0;
+
+    /* 先探测该页首尾是否可读且为空白, 不存在/别名则直接放弃 */
+    if (p[0] != 0xFFFFu || p[511] != 0xFFFFu) return 4;
+
+    FLASH->KEYR = 0x45670123u;
+    FLASH->KEYR = 0xCDEF89ABu;
+    if (FLASH->CR & FLASH_CR_LOCK) return 1;
+
+    /* 只做"空页写入->回读": 不擦除。地址不存在时擦除会把 FPEC 卡在 BSY,
+       写入最坏只是置 PGERR 标志, 不会把设备挂死。 */
+    FLASH->SR = 0xFFFFFFFFu;
+    FLASH->CR |= FLASH_CR_PG;
+    for (i = 0; i < 8u; i++) {
+        p[i] = pat[i];
+        if (flash_wait(100u)) { r = 2; break; }
+    }
+    FLASH->CR &= ~FLASH_CR_PG;
+    if (FLASH->SR & (FLASH_SR_PGERR | FLASH_SR_WRPRTERR)) r = 2;
+    FLASH->SR = FLASH_SR_PGERR | FLASH_SR_WRPRTERR;
+
+    if (r == 0) {
+        for (i = 0; i < 8u; i++) {
+            if (p[i] != pat[i]) { r = 3; break; }
+        }
+    }
+    FLASH->CR |= FLASH_CR_LOCK;
+    return r;
+}
+#endif /* DBG_TOOLS */
+
 /* ------------------------- 镜像下载会话 ---------------------------------- */
 static uint32_t s_img_len, s_img_crc, s_img_addr, s_img_received;
 static uint8_t  s_img_active;
@@ -153,12 +207,17 @@ static void cmd_exec(uint8_t cmd, const uint8_t *pl, uint16_t len)
         }
         p[17] = g_status.state;
         p[18] = g_status.last_result;
-        proto_respond(cmd, RSP_OK, p, 19);
+        {   /* 本机 Flash 自报容量(KB): F103C8 可能报 64 但实际更大, 仅供参考 */
+            uint32_t fsz = (uint32_t)(*(volatile uint16_t *)0x1FFFF7E0u);
+            memcpy(&p[19], &fsz, 4);
+        }
+        proto_respond(cmd, RSP_OK, p, 23);
         break;
     }
 
     case CMD_IMG_BEGIN:
-        if (len != 12u) { proto_respond(cmd, RSP_ERR_ARG, 0, 0); break; }
+        /* 12B 头 + 可选文件名 (U 盘模式下显示同名) */
+        if (len < 12u) { proto_respond(cmd, RSP_ERR_ARG, 0, 0); break; }
         if (g_status.state == 2u) {      /* 烧录中禁止更新镜像 */
             proto_respond(cmd, RSP_ERR_STATE, 0, 0);
             break;
@@ -174,6 +233,12 @@ static void cmd_exec(uint8_t cmd, const uint8_t *pl, uint16_t len)
         if (Storage_Erase() != STORAGE_OK) {
             proto_respond(cmd, RSP_ERR_FLASH, 0, 0);
             break;
+        }
+        /* 文件名: 与 U 盘写入保持一致, 便于在 U 盘里看到同一文件名 */
+        if (len > 12u) {
+            Storage_SetImageName((const char *)&pl[12], (uint32_t)(len - 12u));
+        } else {
+            Storage_SetImageName("FIRMWARE.BIN", 12u);
         }
         s_img_received = 0;
         s_img_active = 1;
@@ -229,6 +294,24 @@ static void cmd_exec(uint8_t cmd, const uint8_t *pl, uint16_t len)
         break;
     }
 
+    case CMD_IMG_CLEAR:
+        /* 删除烧录器里存的目标固件: 擦掉镜像头所在页即可让镜像失效,
+           主循环下一轮会切到"无镜像"状态, 之后不会再对任何目标自动烧录 */
+        if (g_status.state == 2u) {          /* 烧录中不允许删 */
+            proto_respond(cmd, RSP_ERR_STATE, 0, 0);
+            break;
+        }
+        if (Storage_ErasePage(0u) != STORAGE_OK) {
+            proto_respond(cmd, RSP_ERR_FLASH, 0, 0);
+            break;
+        }
+        s_img_active = 0;
+        g_status.last_result = 0;
+        g_status.last_error = 0;
+        Log_Str("IMG CLEAR\n");
+        proto_respond(cmd, RSP_OK, 0, 0);
+        break;
+
     case CMD_PROG_NOW:
         s_prog_req_flag = 1;
         proto_respond(cmd, RSP_OK, 0, 0);
@@ -268,11 +351,13 @@ static void cmd_exec(uint8_t cmd, const uint8_t *pl, uint16_t len)
         NVIC_SystemReset();
         break;
 
+#if DBG_TOOLS
     case CMD_CLK_TEST:
         /* 示波器测试: payload[0]!=0 开启持续输出 SWCLK/SWDIO 方波, 0 关闭 */
         g_clk_test = (uint8_t)((len >= 1u && pl[0]) ? 1u : 0u);
         proto_respond(cmd, RSP_OK, 0, 0);
         break;
+#endif
 
     case CMD_LOG_POLL: {
         uint8_t lb[48];
@@ -374,6 +459,17 @@ static void cmd_exec(uint8_t cmd, const uint8_t *pl, uint16_t len)
         proto_respond(cmd, RSP_OK, p, 5);
         break;
     }
+
+#if DBG_TOOLS
+    case CMD_FLASH_TEST: {
+        uint32_t fsz = (uint32_t)(*(volatile uint16_t *)0x1FFFF7E0u);
+        p[0] = (uint8_t)(fsz > 255u ? 255u : fsz);   /* 芯片自报 KB */
+        p[1] = flash_page_test(0x08010000u);         /* 64KB 之上第一页 */
+        p[2] = flash_page_test(0x08020000u);         /* 128KB 之上第一页 */
+        proto_respond(cmd, RSP_OK, p, 3);
+        break;
+    }
+#endif
 
     default:
         proto_respond(cmd, RSP_ERR_ARG, 0, 0);

@@ -144,7 +144,7 @@ int main(void)
     uint32_t t_detect = 0;
 
 #ifdef BUILD_APP
-    /* 应用链接在 0x08004000, 必须在开启任何中断前重定位向量表 */
+    /* 应用链接在 APP_BASE, 必须在开启任何中断前重定位向量表 */
     SCB->VTOR = APP_BASE;
 #endif
 
@@ -194,14 +194,17 @@ int main(void)
     Log_Dec(s_state == ST_ARMED);
     Log_Str("\n");
 
+    WDT_Init();                             /* 初始化完成后再启动看门狗 */
+
     for (;;) {
+        WDT_Feed();                         /* 独立看门狗: 卡死 3.2s 自动复位 */
 #if USB_HAS_CDC
         Proto_Poll();                       /* 处理上位机命令 */
         USB_CDC_Poll();
 #endif
         led_update();
 
-#if USB_HAS_CDC
+#if USB_HAS_CDC && DBG_TOOLS
         /* 示波器时钟测试模式: 持续输出 SWCLK/SWDIO 方波, 暂停目标探测 */
         if (g_clk_test) {
             SWD_ClkTestBurst(10u);
@@ -209,15 +212,18 @@ int main(void)
         }
 #endif
 
-        /* 镜像状态可能因上位机/U盘写入而改变 */
-        if (s_state == ST_NO_IMAGE && Storage_ImageValid()) {
+        /* 镜像状态可能因上位机/U盘写入或清除而改变 */
+        if (!Storage_ImageValid()) {
+            /* 无镜像: 无论之前是待命/成功等待/失败等待, 一律回到"无镜像", 不再烧录 */
+            if (s_state != ST_NO_IMAGE && s_state != ST_PROGRAMMING) {
+                s_state = ST_NO_IMAGE;
+                g_status.state = s_state;
+                Log_Str("IMG 0\n");
+            }
+        } else if (s_state == ST_NO_IMAGE) {
             s_state = ST_ARMED;
             g_status.state = s_state;
             Log_Str("IMG 1\n");
-        } else if (s_state == ST_ARMED && !Storage_ImageValid()) {
-            s_state = ST_NO_IMAGE;
-            g_status.state = s_state;
-            Log_Str("IMG 0\n");
         }
 
         if (s_state == ST_PROGRAMMING) continue;

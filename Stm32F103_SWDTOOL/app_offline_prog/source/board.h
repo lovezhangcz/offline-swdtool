@@ -20,9 +20,10 @@
   *       PA15 : USB D+ 1.5k 上拉控制 (与 JTAG JTDI 复用, 需关 JTAG)
   *
   *   Flash 布局 (C8T6 = 64KB, 1KB/页):
-  *     0x08000000 - 0x08003FFF : boot (16KB, 独立 target, 只烧一次)
-  *     0x08004000 - 0x0800BFFF : 应用 (32KB, 可经 USB 由 boot 升级)
-  *     0x0800C000 - 0x0800FFFF : 目标固件镜像存储区 (16KB)
+  *     0x08000000 - 0x080017FF : boot (6KB, 独立 target, 只烧一次)
+  *     0x08001800 - 0x080067FF : 应用 (20KB, 可经 USB 由 boot 升级)
+  *     0x08006800 - 0x0800FBFF : 目标固件镜像存储区 (37KB)
+  *     0x0800FC00 - 0x0800FFFF : boot 升级标志页 (boot 维护, 应用不碰)
   *
   *   老 target (offline_prog_CDC / MSC) 不带 BUILD_APP 宏, 仍保持
   *   0x08000000 起 32KB 程序 + 0x08008000 起 32KB 镜像区, 作为回退。
@@ -45,6 +46,17 @@
 #define BOARD_VARIANT_B     2
 #ifndef BOARD_VARIANT
 #define BOARD_VARIANT       BOARD_VARIANT_A
+#endif
+
+/* ------------------------------------------------------------ 调试开关 ---- */
+/* DBG_TOOLS = 1 : 保留只用于开发排查的功能, 会占约 1.5KB 代码
+ *      - 示波器时钟测试 (CMD_CLK_TEST / 主循环方波输出)
+ *      - 本机 Flash 实际容量自检 (CMD_FLASH_TEST, 会访问不存在的地址)
+ *      - 探针里的引脚电平/时钟网络/原始波形/引脚组合扫描/DHCSR/GPIO 采样诊断
+ * DBG_TOOLS = 0 : 以上全部裁掉, 只保留握手+读 IDCODE 的简洁探针 (量产用)
+ * 也可以不改源码, 在 Keil 的 C/C++ Define 里加 DBG_TOOLS=1 临时打开。 */
+#ifndef DBG_TOOLS
+#define DBG_TOOLS           0
 #endif
 
 /* ---------------------------------------------------------------- LED ---- */
@@ -170,10 +182,10 @@
 /* ------------------------------------------------------- flash 存储布局 ---- */
 /* 64KB flash 分区 (1KB/页):
  *
- *   0x08000000 - 0x08003FFF : boot 16KB
- *       0x08003C00 最后一页 : boot 升级标志 (boot 自己维护, 永不擦)
- *   0x08004000 - 0x0800BFFF : 应用 32KB (由 boot 通过 USB 升级)
- *   0x0800C000 - 0x0800FFFF : 目标固件镜像存储区 16KB
+ *   0x08000000 - 0x080017FF : boot 6KB
+ *   0x08001800 - 0x080067FF : 应用 20KB (由 boot 通过 USB 升级)
+ *   0x08006800 - 0x0800FBFF : 目标固件镜像存储区 37KB
+ *   0x0800FC00 - 0x0800FFFF : boot 升级标志页
  *
  * BUILD_BOOT : 编译 boot (Bootloader)
  * BUILD_APP  : 编译可被 boot 升级的应用 target (APP_CDC / APP_MSC)
@@ -182,11 +194,10 @@
 #define FLASH_PAGE_SIZE     1024u
 
 #define BOOT_BASE           0x08000000u
-#define BOOT_SIZE           (16u * 1024u)
-#define BOOT_FLAG_ADDR      (BOOT_BASE + BOOT_SIZE - FLASH_PAGE_SIZE)
+#define BOOT_SIZE           (6u * 1024u)
 
-#define APP_BASE            0x08004000u
-#define APP_SIZE            (32u * 1024u)
+#define APP_BASE            0x08001800u
+#define APP_SIZE            (20u * 1024u)
 
 /* 备份寄存器分配 (复位/看门狗复位保持; 需备份域写使能 PWR_CR_DBP) */
 #define BKP_REG_FORCE       BKP->DR1        /* 应用写 BOOT_FORCE_MAGIC 后软复位 -> boot 直接进升级模式 */
@@ -195,20 +206,22 @@
 #define BOOT_FORCE_MAGIC    0x5A5Au
 /* 连续 N 次复位都没等到应用确认启动 -> 常驻 boot, 避免坏应用把设备锁死 */
 #define BOOT_TRY_MAX        3u
+
+/* 升级标志页: 放 flash 最后一页 (boot 占 6KB 后其尾部已无空页可用;
+ * 该页不属于镜像区, 应用擦除镜像时不会碰到它) */
+/* 镜像存储区紧接 APP 区之后, 到标志页之前; 最后 1KB 归 boot 存升级标志 */
+#define IMG_STORE_ADDR      (APP_BASE + APP_SIZE)   /* 0x08006800 */
+#if defined(FLASH_128K)
+  #define BOOT_FLAG_ADDR    0x0801FC00u
+  #define IMG_STORE_SIZE    (101u * 1024u)          /* 0x08006800 - 0x0801FBFF */
+#else
+  #define BOOT_FLAG_ADDR    0x0800FC00u
+  #define IMG_STORE_SIZE    (37u * 1024u)           /* 0x08006800 - 0x0800FBFF */
+#endif
+
 /* 升级标志页内容 */
 #define BOOT_FLAG_MAGIC     0x424F4F54u     /* "BOOT" */
 #define BOOT_FLAG_VALID     0xA55A5AA5u
-
-#if defined(BUILD_APP)
-  #define IMG_STORE_ADDR    0x0800C000u
-  #define IMG_STORE_SIZE    (16u * 1024u)     /* 0x0800C000 - 0x0800FFFF */
-#elif defined(FLASH_128K)
-  #define IMG_STORE_ADDR    0x08008000u
-  #define IMG_STORE_SIZE    (96u * 1024u)     /* 0x08008000 - 0x0801FFFF */
-#else
-  #define IMG_STORE_ADDR    0x08008000u
-  #define IMG_STORE_SIZE    (32u * 1024u)     /* 0x08008000 - 0x0800FFFF */
-#endif
 
 /* 镜像头: 放在存储区起始 32 字节 */
 #define IMG_MAGIC           0x53574447u       /* "SWDG" */

@@ -35,12 +35,16 @@ void    SWD_PinDiag(uint8_t *idle, uint8_t *io_rel, uint8_t *io_hold,
 /* 时钟网络自检: PA3<->PB13 互相驱动/采样是否连通 (A 板) */
 void    SWD_ClockDiag(uint8_t *a_drv_b, uint8_t *b_drv_a);
 /* 原始监听: 发 DPIDR 读请求后连续采样 32 拍 SWDIO, mode=0 上升沿前/1 上升沿后采样 */
+#if DBG_TOOLS
 uint32_t SWD_ListenRaw(uint8_t mode);
+#endif
 /* SWDIO 自回环: bit0/bit1 = 发送脚拉低/拉高时采样脚读到的电平 (跟随正常=2) */
 uint8_t  SWD_SelfEcho(void);
+#if DBG_TOOLS
 /* 示波器时钟测试模式: g_clk_test=1 时主循环持续输出测试方波; burst 输出 ms 毫秒 */
 extern volatile uint8_t g_clk_test;
 void     SWD_ClkTestBurst(uint32_t ms);
+#endif
 /* 诊断: 最近一次 SWD 事务读到的 3 位 ACK 原始值 (0/7=无驱动, 1=OK, 2=WAIT, 4=FAULT) */
 extern uint8_t g_swd_dbg_ack;
 /* 释放 SWD 引脚 (检测目标拔出后降低干扰) */

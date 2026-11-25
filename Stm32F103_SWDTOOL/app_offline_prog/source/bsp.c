@@ -56,3 +56,23 @@ void BSP_DelayMs(uint32_t ms)
     uint32_t t0 = s_ms;
     while ((s_ms - t0) < ms) { }
 }
+
+/* ---------------- 独立看门狗 ----------------
+   目的: 程序卡死(例如等 FPEC/等 SWD 应答的死循环)时自动复位, 不用拔电。
+   LSI 约 40kHz, PR=100(64 分频) -> 1.6ms 每拍, RLR=2000 -> 约 3.2s 超时。
+   注意: IWDG 一旦启动无法关闭, 任何系统复位都会重新关闭它,
+        所以只在应用里启动(不启动 boot 那边)。 */
+void WDT_Init(void)
+{
+    IWDG->KR  = 0xCCCCu;        /* 启动 */
+    IWDG->KR  = 0x5555u;        /* 允许写 PR/RLR */
+    IWDG->PR  = 4u;             /* 64 分频 */
+    IWDG->RLR = 2000u;          /* 3.2s */
+    while (IWDG->SR) { }        /* 等更新生效 */
+    IWDG->KR  = 0xAAAAu;        /* 喂一次 */
+}
+
+void WDT_Feed(void)
+{
+    IWDG->KR = 0xAAAAu;
+}
