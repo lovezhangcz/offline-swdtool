@@ -140,6 +140,26 @@ static uint8_t target_id_check(uint32_t idcode)
 #endif
 }
 
+/* 停机并确认 S_HALT 真的置位: DHCSR 写入偶发不生效 (SWD 写通路临界),
+ * 不确认就往下走会在目标仍运行时改 PC/寄存器, 导致"算法返回怪值" */
+static uint8_t halt_target(void)
+{
+    uint32_t dh = 0;
+    uint8_t i;
+
+    for (i = 0; i < 8u; i++) {
+        (void)SWD_Mem_Write32(DHCSR, 0xA05F0003u);
+        if (SWD_Mem_Read32(DHCSR, &dh) != SWD_OK) break;
+        if (dh & (1u << 17)) {                  /* S_HALT */
+            if (i) { Log_Str("HALT ok try="); Log_Dec(i); Log_Str("\n"); }
+            return TP_OK;
+        }
+        BSP_DelayMs(5);
+    }
+    Log_Str("HALT fail dh="); Log_Hex(dh); Log_Str("\n");
+    return TP_ERR_HALT;
+}
+
 /* 冻结目标看门狗: F1/GD32 写 DBGMCU_CR; F4/APM32F4 写 DBGMCU_APB1_FZ */
 static void freeze_wdog(const flash_algo_t *algo)
 {
@@ -365,13 +385,24 @@ static uint8_t tp_run_impl(uint32_t *err_addr)
         }
     }
 
+    /* ---- 0. 先复位一次, 让目标处于"刚复位"状态 ----
+       目标跑着旧固件时, 烧录算法的 Init/擦除偶发返回错误 (同一块板
+       第二次点击失败就是这个原因); 复位后立即连的稳定性明显更好。 */
+    r = target_attach();
+    if (r != TP_OK) { SWD_GPIO_Release(); return r; }
+    (void)SWD_Mem_Write32(DHCSR, 0xA05F0000u);   /* 解除停机 */
+    (void)SWD_Mem_Write32(AIRCR, 0x05FA0004u);   /* SYSRESETREQ */
+    BSP_DelayMs(60);
+    SWD_GPIO_Release();
+    BSP_DelayMs(40);
+
     /* ---- 1. 连接并停机 ---- */
     r = target_attach();
     if (r != TP_OK) { SWD_GPIO_Release(); return r; }
 
-    /* 冻结看门狗, 停机 */
+    /* 冻结看门狗, 停机 (并确认真的停住) */
     freeze_wdog(ACTIVE_ALGO);
-    if (SWD_Mem_Write32(DHCSR, 0xA05F0003u) != SWD_OK) return TP_ERR_HALT;
+    if ((r = halt_target()) != TP_OK) return r;
     SWD_ReleaseNRST();      /* 停机已生效, 释放复位 (固件不会跑起来) */
 
     /* ---- 2. 下载烧录算法到目标 RAM 并初始化 ---- */
@@ -499,6 +530,21 @@ uint8_t TargetProg_Run(uint32_t *err_addr)
 {
     uint8_t r = tp_run_impl(err_addr);
 
+    /* 偶发失败 (目标供电边缘、克隆料 FMC/算法实现差异):
+       表现为"同一块板第二次点击烧录失败, 重开上位机又好"。
+       这里复位目标后整轮重试一次, 与人工再点一次的效果一致。
+       无镜像/HEX/容量/参数/身份不符/读保护 属于确定性错误, 不重试。 */
+    if (r == TP_ERR_ERASE || r == TP_ERR_WRITE || r == TP_ERR_VERIFY ||
+        r == TP_ERR_ALGO  || r == TP_ERR_HALT  || r == TP_ERR_UNLOCK) {
+        Log_Str("PROG RETRY\n");
+        (void)SWD_Mem_Write32(DHCSR, 0xA05F0000u);   /* 解除停机 */
+        (void)SWD_Mem_Write32(AIRCR, 0x05FA0004u);   /* SYSRESETREQ */
+        BSP_DelayMs(80);
+        SWD_GPIO_Release();
+        BSP_DelayMs(50);
+        r = tp_run_impl(err_addr);
+    }
+
     /* 失败时别把目标丢在停机态, 否则看起来像"芯片没运行": 复位让它重新跑(旧)固件 */
     if (r != TP_OK && r != TP_ERR_CONNECT && r != TP_ERR_NOIMAGE && r != TP_ERR_HEX) {
         (void)SWD_Mem_Write32(DHCSR, 0xA05F0000u);
@@ -595,8 +641,10 @@ uint8_t TargetStream_Begin(uint32_t total_len, uint32_t crc32,
     algo = ACTIVE_ALGO;                 /* AUTO: 识别后取对应算法 */
 
     freeze_wdog(algo);
-    if (SWD_Mem_Write32(DHCSR, 0xA05F0003u) != SWD_OK)
-        return TP_ERR_HALT;
+    if ((r = halt_target()) != TP_OK) {
+        strm_reset_run();
+        return r;
+    }
     SWD_ReleaseNRST();
 
     /* ---- 容量检查: 读目标 Flash 大小 (KB) ---- */
@@ -782,10 +830,10 @@ uint8_t TargetEraseChip(void)
     algo = ACTIVE_ALGO;                 /* AUTO: 识别后取对应算法 */
 
     freeze_wdog(algo);
-    if (SWD_Mem_Write32(DHCSR, 0xA05F0003u) != SWD_OK) {
+    if ((r = halt_target()) != TP_OK) {
         Log_Str("EA halt fail\n");
         SWD_GPIO_Release();
-        return TP_ERR_HALT;
+        return r;
     }
     SWD_ReleaseNRST();
 

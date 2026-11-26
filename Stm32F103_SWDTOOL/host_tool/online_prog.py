@@ -18,6 +18,8 @@
      最多放两段固件 (bin 可手动填偏移, hex 自动识别地址并锁定), 合并后 AES
      加密成 .aesbin; 文件尾部携带目标芯片代码 (0=自动识别) + 64 字节保留区。
      加载 .aesbin 时在内存里解密还原, 界面上显示芯片代码。
+     子窗口里的 [升级烧录器] 选择应用固件即可升级烧录器 (升级前校验识别码与
+     版本: 识别码不符或版本相同/更低会被拒绝, 版本 0 为调试版可覆盖任何版本)。
   4. 上位机在线期间持续轮询, 烧录器据此判定"上位机在线"(3 秒内有命令),
      每次烧录结束都会报告结果 (成功/失败) 和累计成功次数, 界面同步更新。
      累计次数由烧录器保存在 Flash 流水区, 掉线重连也不会丢。
@@ -27,6 +29,8 @@
 运行: 双击 online_prog.py 或  python online_prog.py
 依赖: Python3 + pyserial + tkinter(自带), 复用同目录 boot_flash.py 的协议实现
 """
+import contextlib
+import io
 import os
 import queue
 import threading
@@ -88,6 +92,8 @@ class Worker(threading.Thread):
         self.fw = None                # dict: load/data/crc/name/trailer
         self.burn_req = False
         self.upload_req = False       # 把镜像写入烧录器 (离线模式用)
+        self.upgrade_req = None       # 待执行的"升级烧录器"固件路径
+        self.port = None              # 当前设备串口
         self.stream_mode = False      # 启用流水烧录
         self.clear_req = False        # 需要清除一次烧录器镜像
         self.last_seq = None          # 设备侧烧录尝试序号 (发现新结果用)
@@ -110,6 +116,16 @@ class Worker(threading.Thread):
     def request_upload(self):
         with self.lock:
             self.upload_req = True
+
+    def request_upgrade(self, path):
+        with self.lock:
+            self.upgrade_req = path
+
+    def take_upgrade(self):
+        with self.lock:
+            r = self.upgrade_req
+            self.upgrade_req = None
+            return r
 
     def take_upload(self):
         with self.lock:
@@ -335,6 +351,22 @@ class Worker(threading.Thread):
                       done=st["progress"], seconds=0.0)
             self.set_state(S_OK if ok else S_FAIL)
 
+    def run_upgrade(self, path):
+        """升级烧录器应用 (走 boot 的 CDC 流程): 识别码/版本由 boot_flash 校验,
+        do_flash 会自己让应用重启进 boot、写入、CRC 校验并启动新应用。"""
+        self.emit("log", text="开始升级烧录器: %s" % os.path.basename(path))
+        self.set_state(S_PROG)
+        self.emit("progress", done=0, total=1)
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                ver = bf.do_flash(self.port, path)
+        finally:
+            for ln in buf.getvalue().replace("\r", "").splitlines():
+                if ln.strip():
+                    self.emit("log", text=ln.strip())
+        self.emit("log", text="升级完成, 烧录器已重启 (版本 %s)" % (ver or "?"))
+
     def run(self):
         app = None
         presence = None
@@ -346,7 +378,7 @@ class Worker(threading.Thread):
             # ---------- 设备连接 / 自动重连 ----------
             if app is None:
                 dev = bf.find_port(verbose=False)
-                app = bf.try_app(dev, 1.0) if dev else None
+                app = bf.ensure_app(dev, 3.0) if dev else None
                 if app is None:
                     self.reconn_tries += 1
                     now = time.time()
@@ -356,6 +388,8 @@ class Worker(threading.Thread):
                     time.sleep(RECONNECT_S)
                     continue
                 self.reconn_tries = 0
+                dev = app.dev
+                self.port = dev
                 try:
                     ver = app.version()
                 except Exception:
@@ -372,6 +406,32 @@ class Worker(threading.Thread):
                 continue
 
             try:
+                # ---------- 升级烧录器 (子窗口 [升级烧录器] 触发) ----------
+                up = self.take_upgrade()
+                if up:
+                    try:
+                        app.close()
+                    except Exception:
+                        pass
+                    try:
+                        self.run_upgrade(up)
+                    except Exception as e:
+                        self.emit("log", text="升级失败: %s" % e)
+                    self.take_burn()
+                    self.last_seq = None
+                    self.dev_key = None
+                    self.host_on = None
+                    self.t_status = 0.0
+                    app = None
+                    self.port = None
+                    presence = None
+                    self.emit("device", port=None, version=None)
+                    self.emit("presence", idcode=None)
+                    self.emit("host", on=False)
+                    self.set_state(S_NO_DEV)
+                    time.sleep(SETTLE_S)
+                    continue
+
                 # ---------- 勾选流水烧录时, 清一次烧录器镜像 ----------
                 if self.take_clear() and self.state != S_PROG:
                     try:
@@ -438,6 +498,7 @@ class Worker(threading.Thread):
                 except Exception:
                     pass
                 app = None
+                self.port = None
                 presence = None
                 self.take_burn()          # 掉线时丢弃未执行的烧录请求
                 self.emit("device", port=None, version=None)
@@ -456,12 +517,13 @@ class Worker(threading.Thread):
 class MakeAesbinDialog(tk.Toplevel):
     """生产固件发送方用的制作窗口: 可放两段固件, 合并后 AES 加密打包"""
 
-    def __init__(self, master):
+    def __init__(self, master, on_upgrade=None):
         super().__init__(master)
         self.title("制作专用烧录文件 (.aesbin)")
         self.transient(master)
         self.grab_set()
         self.resizable(False, False)
+        self.on_upgrade = on_upgrade     # 升级烧录器回调 (传入选定的固件路径)
         self.slots = [dict(path=None, data=None, is_hex=False),
                       dict(path=None, data=None, is_hex=False)]
         self._rows = []
@@ -501,10 +563,32 @@ class MakeAesbinDialog(tk.Toplevel):
 
         bar = tk.Frame(self)
         bar.pack(fill="x", padx=12, pady=(4, 12))
+        tk.Button(bar, text="升级烧录器", width=12,
+                  command=self._upgrade).pack(side="left")
         tk.Button(bar, text="生成 .aesbin", width=14,
                   command=self._generate).pack(side="right")
         tk.Button(bar, text="关闭", width=8,
                   command=self.destroy).pack(side="right", padx=8)
+
+    def _upgrade(self):
+        """选择应用固件并交给主窗口的 Worker 执行升级 (识别码/版本由升级流程校验)"""
+        if self.on_upgrade is None:
+            return
+        p = filedialog.askopenfilename(
+            title="选择烧录器应用固件 (升级用)",
+            filetypes=[("应用固件", "*.bin *.hex *.ihx"), ("所有文件", "*.*")])
+        if not p:
+            return
+        if not messagebox.askyesno(
+                "确认升级",
+                "将把\n%s\n升级到烧录器的 APP 区。\n\n"
+                "升级前会校验固件识别码与版本: 识别码不符、或版本相同/更低会被拒绝"
+                " (版本 0 为调试版, 可覆盖任何版本)。\n"
+                "升级期间请勿断开 USB, 完成后烧录器会自动重启。\n\n继续?"
+                % os.path.basename(p)):
+            return
+        self.destroy()                   # 关掉子窗口, 便于查看主窗口日志
+        self.on_upgrade(p)
 
     def _open(self, i):
         p = filedialog.askopenfilename(
@@ -723,7 +807,14 @@ class App(tk.Tk):
         self._update_burn_btn()
 
     def _open_maker(self):
-        MakeAesbinDialog(self)
+        MakeAesbinDialog(self, self._request_upgrade)
+
+    def _request_upgrade(self, path):
+        if not self.dev_online:
+            messagebox.showwarning("未连接", "烧录器未连接, 无法升级")
+            return
+        self._log("请求升级烧录器: %s" % os.path.basename(path))
+        self.worker.request_upgrade(path)
 
     def _upload(self):
         self.worker.request_upload()

@@ -258,10 +258,49 @@ typedef struct {
 /* 系统时钟: 72MHz (HSE 8MHz x PLL9, USB 48MHz = 72/1.5) */
 #define SYSCLK_HZ           72000000u
 
-/* 应用版本号 (GET_VERSION 命令用, 确认升级是否真正生效) */
-#ifndef APP_VERSION_STR
-#define APP_VERSION_STR     "1.0.0"
+/* --------------------------------------------------- 应用固件版本信息 ---- */
+/* 版本号只有一个来源: 下面 主/次/修订 三个数字。改版本只改这里, 版本字符串
+ * (GET_VERSION 日志用) 与数值版本号 (升级比较用) 会自动同步,
+ * 数值版本 = 主*10000 + 次*100 + 修订 (例如 1.1.6 -> 10106)。
+ * 三个数字全为 0 即 0 号版本 (调试版, 可覆盖任何版本)。
+ *
+ * 在应用镜像里"比较靠前的固定位置"放一份识别码 + 版本号, 不涉及 boot:
+ * 上位机升级前从新固件镜像的同一偏移读出 (识别码, 版本), 与本机运行中的
+ * 应用经 GET_INFO 上报的值比较:
+ *   - 识别码 != APP_FW_MAGIC : 不是本项目的应用固件, 拒绝升级
+ *   - 版本 == 0              : 调试版, 不受限制, 可覆盖任何版本
+ *   - 版本 <= 当前版本        : 拒绝升级
+ * 该结构在设备 Flash 里的地址也是 APP_BASE + 0x100, 与镜像偏移完全一致;
+ * 0x100 在中断向量表 (约 0xBC) 之后, 不会被向量表占用。 */
+#ifndef APP_FW_VERSION_MAJOR
+#define APP_FW_VERSION_MAJOR  1
 #endif
+#ifndef APP_FW_VERSION_MINOR
+#define APP_FW_VERSION_MINOR  1
+#endif
+#ifndef APP_FW_VERSION_PATCH
+#define APP_FW_VERSION_PATCH  11
+#endif
+
+#define APP_STR_(x)         #x
+#define APP_STR(x)          APP_STR_(x)
+#define APP_VERSION_STR     APP_STR(APP_FW_VERSION_MAJOR) "." \
+                            APP_STR(APP_FW_VERSION_MINOR) "." \
+                            APP_STR(APP_FW_VERSION_PATCH)
+
+/* 数值版本号: 上位机升级比较用 (0 = 调试版) */
+#define APP_FW_VERSION      ((uint32_t)APP_FW_VERSION_MAJOR * 10000u + \
+                             (uint32_t)APP_FW_VERSION_MINOR * 100u +   \
+                             (uint32_t)APP_FW_VERSION_PATCH)
+#define APP_FW_MAGIC        0x53574450u     /* "SWDP" 本项目应用固件识别码 */
+#define APP_FW_INFO_OFFSET  0x100u
+#define APP_FW_INFO_ADDR    (APP_BASE + APP_FW_INFO_OFFSET)
+
+typedef struct {
+    uint32_t magic;         /* APP_FW_MAGIC                    */
+    uint32_t version;       /* APP_FW_VERSION (0 = 调试版)     */
+    uint32_t reserved[2];   /* 预留                            */
+} app_fw_info_t;            /* 共 16 字节 */
 
 /* SWD 速度: 半周期延时循环次数, 越大越慢越稳 */
 #ifndef SWD_DELAY_LOOP

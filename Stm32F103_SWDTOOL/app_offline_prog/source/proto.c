@@ -50,6 +50,9 @@
 /* 最大帧载荷: IMG_DATA = offset(4) + data(508) */
 #define MAX_PAYLOAD     520u
 
+/* main.c 中固定在 APP_FW_INFO_ADDR 处的应用固件识别码/版本 */
+extern const app_fw_info_t g_app_fw_info;
+
 /* ------------------------- 接收字节环 (USB ISR 写入) --------------------- */
 #define RX_RING_SIZE    1024u
 static uint8_t  s_rx_ring[RX_RING_SIZE];
@@ -293,7 +296,7 @@ static void app_reboot_to_boot(void)
 
 static void cmd_exec(uint8_t cmd, const uint8_t *pl, uint16_t len)
 {
-    uint8_t p[32];
+    uint8_t p[40];
 
     /* 收到上位机命令 -> 判定上位机在线 (超时由 Proto_Poll 复位) */
     s_host_ms = BSP_Millis();
@@ -346,7 +349,11 @@ static void cmd_exec(uint8_t cmd, const uint8_t *pl, uint16_t len)
             memcpy(&p[27], &chip, 4);
             p[31] = (uint8_t)tr;
         }
-        proto_respond(cmd, RSP_OK, p, 32);
+        {   /* 应用固件识别码 + 版本 (镜像固定偏移 0x100 处, 上位机升级前比较) */
+            memcpy(&p[32], &g_app_fw_info.version, 4);
+            memcpy(&p[36], &g_app_fw_info.magic,   4);
+        }
+        proto_respond(cmd, RSP_OK, p, 40);
         break;
     }
 

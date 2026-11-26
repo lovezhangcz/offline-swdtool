@@ -47,6 +47,14 @@
 
 prog_status_t g_status;
 
+/* 应用固件版本信息: 用 ARMCC 的 at() 属性固定在镜像偏移 0x100 处
+ * (APP_BASE + 0x100), 上位机升级前从新固件的同一偏移读出识别码/版本,
+ * 再与本机运行中的应用经 GET_INFO 上报的值比较。该对象被 proto.c 引用,
+ * 不会被链接器裁掉。 */
+const app_fw_info_t g_app_fw_info __attribute__((at(APP_FW_INFO_ADDR))) = {
+    APP_FW_MAGIC, APP_FW_VERSION, { 0u, 0u }
+};
+
 static uint8_t s_attached;      /* 目标当前是否在线 */
 static uint8_t s_state;
 static uint32_t s_done_crc;     /* 最近一次烧录用到的镜像 CRC32 */

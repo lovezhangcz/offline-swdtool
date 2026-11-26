@@ -14,7 +14,7 @@
     整片擦除目标芯片 (带确认, 擦完校验首末字为空白)
     清除烧录器固件 (删除板内镜像, 之后不再自动烧录)
     U 盘模式烧录 (需主板运行 APP_MSC)
-    升级主板应用 (走 boot 的 CDC 升级通道)
+    升级主板应用 (走 boot 的 CDC 升级通道, 校验固件识别码与版本)
 
 所有操作输出与设备日志都带时间戳显示在窗口里, 并同步写入 logs/ 目录。
 """
@@ -309,7 +309,7 @@ class FlashGui:
         def job():
             dev = self._need_dev()
             print("连接 %s ..." % dev)
-            app = bf.try_app(dev, 2.0)
+            app = bf.ensure_app(dev, 3.0)
             if app is None:
                 raise RuntimeError("设备无应答: 请确认应用已运行 (可先执行 upgrade/run)")
             try:
@@ -317,6 +317,10 @@ class FlashGui:
                 i = app.info()
                 print("镜像: valid=%d len=%d crc=%08X load=0x%08X 容量=%d"
                       % (i["valid"], i["length"], i["crc32"], i["load"], i["capacity"]))
+                if i.get("fw_version") is not None:
+                    print("固件版本: %s  识别码: 0x%08X  烧录计数: %d 次"
+                          % (bf.fmt_fw_version(i["fw_version"]),
+                             i.get("fw_magic") or 0, i.get("burn_count") or 0))
                 print("状态: %s  result=%d"
                       % (bf.ST_NAMES.get(i["state"], i["state"]), i["result"]))
                 try:

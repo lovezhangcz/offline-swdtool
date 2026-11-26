@@ -6,7 +6,7 @@ USB 调试闭环工具: 通过 boot 升级应用 + 抓诊断日志
 用法 (在 host_tool 目录下):
     python boot_flash.py info                  # 查看当前是 boot 还是 app, 版本/镜像状态
     python boot_flash.py build  [target]       # 编译 APP 并生成 .bin (默认 app_cdc)
-    python boot_flash.py flash  <bin>          # 升级指定 .bin (走 boot 的 CDC 协议)
+    python boot_flash.py flash  <bin>          # 升级指定 .bin (校验识别码/版本, 同/低版本拒绝)
     python boot_flash.py msc    <bin>          # 升级指定 .bin (写 U 盘 + 回读 CRC 自证)
     python boot_flash.py upgrade [target]      # 一键: 编译 -> 升级 -> 校验版本 -> 打印日志
     python boot_flash.py boot                  # 让应用重启进入 boot
@@ -58,6 +58,10 @@ SERIAL_PIDS = (PID_CDC, PID_COMP)
 APP_BASE = 0x08002000
 APP_SIZE = 20 * 1024        # APP 区 20KB (所有容量统一: boot 6KB + 标志区 2KB 之后)
 APP_BASES = (APP_BASE,)
+
+# 应用固件版本信息 (与 board.h 一致): 位于应用镜像/设备 Flash 固定偏移 0x100 处
+APP_FW_MAGIC = 0x53574450       # "SWDP" 本项目应用固件识别码
+APP_FW_INFO_OFFSET = 0x100
 CHUNK = 512
 BOOT_WAIT = 12.0
 
@@ -237,11 +241,14 @@ class AppLink:
         burn = struct.unpack("<I", pl[23:27])[0] if len(pl) >= 27 else 0
         chip = struct.unpack("<I", pl[27:31])[0] if len(pl) >= 32 else 0xFFFFFFFF
         trailer = pl[31] if len(pl) >= 32 else 0
+        fw_ver = struct.unpack("<I", pl[32:36])[0] if len(pl) >= 36 else None
+        fw_magic = struct.unpack("<I", pl[36:40])[0] if len(pl) >= 40 else None
         if not pl[0]:                 # 无镜像时头区是空白, 字段无意义
             length = crc = load = 0
         return dict(valid=pl[0], length=length, crc32=crc, load=load,
                     capacity=cap, state=pl[17], result=pl[18], flash_kb=fkb,
-                    burn_count=burn, chip_code=chip, trailer=trailer)
+                    burn_count=burn, chip_code=chip, trailer=trailer,
+                    fw_version=fw_ver, fw_magic=fw_magic)
 
     def reboot_to_boot(self):
         try:
@@ -443,6 +450,38 @@ def try_app(dev, timeout=1.0):
     return None
 
 
+def ensure_app(dev, timeout=3.0):
+    """连接应用; 设备停在 boot 时用 boot 的 RUN 让它启动应用后再连。
+
+    USB 掉线/复位后设备会回到 boot。boot 只要收到任意字节就认为"主机在
+    线"而不再自动跳转应用; 上位机的自动重连探测帧正好会把它一直留在 boot,
+    形成"USB 连不上"的假死。这里用 boot 协议确认后显式发 RUN。"""
+    app = try_app(dev, 0.8)
+    if app is not None:
+        return app
+
+    try:
+        cur = find_port(verbose=False) or dev
+        bl = BootLink(cur, open_port(cur))
+        try:
+            bl.info()                  # 不是 boot 会抛异常
+            bl.ser.write(b"RUN\n")     # 让 boot 启动应用
+        finally:
+            bl.close()
+        time.sleep(0.3)
+    except Exception:
+        pass
+
+    end = time.time() + timeout
+    while time.time() < end:
+        cur = find_port(verbose=False) or dev      # 跳转后可能换 COM 号
+        app = try_app(cur, 0.6)
+        if app is not None:
+            return app
+        time.sleep(0.15)
+    return None
+
+
 def wait_boot(dev, seconds=BOOT_WAIT):
     """等 boot 的串口可用。注意 app_msc(0483:5742) 进 boot(0483:5740) 会换一个
     COM 口号, 所以每轮都重新扫描端口, 不能死守进入前拿到的 dev。"""
@@ -625,6 +664,26 @@ def load_app_image(path):
     return data, base
 
 
+def image_fw_info(data):
+    """从应用镜像的固定偏移读出 (识别码, 版本); 结构不存在时返回 (None, None)"""
+    off = APP_FW_INFO_OFFSET
+    if len(data) < off + 8:
+        return None, None
+    return struct.unpack("<II", data[off:off + 8])
+
+
+def fmt_fw_version(v):
+    """数值版本号 -> 可读文本。新编码 = 主*10000+次*100+修订;
+    旧固件可能只有 1/2 这样的小整数, 也兼容显示。"""
+    if v is None:
+        return "无"
+    if v == 0:
+        return "0(调试版)"
+    if v < 1000:
+        return str(v)
+    return "%d.%d.%d" % (v // 10000, (v // 100) % 100, v % 100)
+
+
 def info_field(info, key, default=None):
     """从 boot 的 "INFO ver=.. app=.. base=0x.." 行里取一个字段"""
     for tok in info.split():
@@ -641,8 +700,39 @@ def info_field(info, key, default=None):
 
 
 def do_flash(dev, bin_path):
-    """升级主板应用: bin/hex 均可, 镜像必须位于 APP 区"""
+    """升级主板应用: bin/hex 均可, 镜像必须位于 APP 区
+
+    升级前校验镜像固定偏移 0x100 处的识别码与版本:
+      - 识别码不符 -> 拒绝 (防止其它项目的固件被误刷)
+      - 新版本 0    -> 调试版, 放行 (可覆盖任何版本)
+      - 新版本 <= 本机当前版本 -> 拒绝
+    本机当前版本由应用经 GET_INFO 上报; 读不到 (设备在 boot / 旧固件) 时放行。"""
     data, app_base = load_app_image(bin_path)
+
+    magic, new_ver = image_fw_info(data)
+    if magic != APP_FW_MAGIC:
+        raise RuntimeError("拒绝升级: 固件识别码 0x%08X 不是本项目 (应为 0x%08X)"
+                           % (magic or 0, APP_FW_MAGIC))
+
+    cur_ver, cur_magic = None, None
+    probe = try_app(dev, 1.0)          # 应用在线时读当前版本; 在 boot 则读不到
+    if probe is not None:
+        try:
+            inf = probe.info()
+            cur_ver, cur_magic = inf.get("fw_version"), inf.get("fw_magic")
+        except Exception:
+            pass
+        finally:
+            probe.close()
+    if new_ver != 0 and cur_ver is not None and cur_magic == APP_FW_MAGIC:
+        if new_ver <= cur_ver:
+            raise RuntimeError("拒绝升级: 新固件版本 %s 不高于当前版本 %s "
+                               "(版本 0 为调试版, 可覆盖任何版本)"
+                               % (fmt_fw_version(new_ver), fmt_fw_version(cur_ver)))
+    print("[app] 当前版本 %s -> 新版本 %s%s"
+          % (fmt_fw_version(cur_ver), fmt_fw_version(new_ver),
+             "  (调试版, 不受版本限制)" if new_ver == 0 else ""))
+
     bl, info = enter_boot(dev, force=True)
     print("[boot]", info)
     boot_base = info_field(info, "base")
@@ -1132,6 +1222,10 @@ def main():
                 extra = ""
                 if m["chip_code"] != 0xFFFFFFFF:
                     extra = " 芯片代码=%s" % aesbin.chip_name(m["chip_code"])
+                if m.get("fw_version") is not None:
+                    extra += ("  固件版本=%s 识别码=0x%08X"
+                              % (fmt_fw_version(m["fw_version"]),
+                                 m.get("fw_magic") or 0))
                 print("[app] 镜像: valid=%d len=%d crc=%08X load=0x%08X cap=%d "
                       "state=%d result=%d 本机Flash自报=%dKB 成功烧录=%d次%s"
                       % (m["valid"], m["length"], m["crc32"], m["load"],

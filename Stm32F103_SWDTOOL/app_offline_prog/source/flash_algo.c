@@ -14,6 +14,7 @@
 #include "swd_host.h"
 #include "bsp.h"
 #include "board.h"
+#include "log.h"
 
 #if USB_HAS_CDC
   #include "proto.h"
@@ -63,10 +64,26 @@ static uint8_t core_reg_read(uint8_t reg, uint32_t *val)
 
 uint8_t FlashAlgo_Load(const flash_algo_t *algo)
 {
+    uint32_t i, n = algo->algo_size / 4u, bad = 0;
+
     /* blob 大小恒为 4 的倍数 (生成脚本保证) */
-    return (SWD_Mem_WriteBlock(algo->algo_start, algo->algo_blob,
-                               algo->algo_size / 4u) == SWD_OK)
-           ? FA_OK : FA_ERR_SWD;
+    if (SWD_Mem_WriteBlock(algo->algo_start, algo->algo_blob,
+                           n) != SWD_OK)
+        return FA_ERR_SWD;
+
+    /* 回读校验: 确认算法真的写进了目标 RAM (SWD 写通路异常时读回会不一致) */
+    for (i = 0; i < n; i += 8u) {
+        uint32_t buf[8];
+        uint32_t cnt = (n - i > 8u) ? 8u : (n - i);
+        uint32_t k;
+        if (SWD_Mem_ReadBlock(algo->algo_start + i * 4u, buf, cnt) != SWD_OK)
+            return FA_ERR_SWD;
+        for (k = 0; k < cnt; k++) {
+            if (buf[k] != algo->algo_blob[i + k]) bad++;
+        }
+    }
+    Log_Str("ALGLD bad="); Log_Dec(bad); Log_Str("\n");
+    return bad ? FA_ERR_SWD : FA_OK;
 }
 
 uint8_t FlashAlgo_Call(const flash_algo_t *algo, uint32_t entry,
@@ -75,6 +92,13 @@ uint8_t FlashAlgo_Call(const flash_algo_t *algo, uint32_t entry,
 {
     uint32_t v, t0;
     uint8_t r;
+    uint8_t is_init = (entry == algo->init);
+
+    if (is_init) {
+        Log_Str("ALGCALL a1="); Log_Hex(a1);
+        Log_Str(" a2=");        Log_Hex(a2);
+        Log_Str(" a3=");        Log_Hex(a3); Log_Str("\n");
+    }
 
     /* 参数与执行上下文 */
     if ((r = core_reg_write(0,  a1)) != FA_OK) return r;
@@ -87,8 +111,12 @@ uint8_t FlashAlgo_Call(const flash_algo_t *algo, uint32_t entry,
     if ((r = core_reg_write(15, entry))                       != FA_OK) return r;
     if ((r = core_reg_write(16, 0x01000000u))                 != FA_OK) return r; /* xPSR.T */
 
-    /* 放行执行: C_DEBUGEN=1, C_HALT=0 */
-    if (SWD_Mem_Write32(DHCSR, DHCSR_KEY | 0x1u) != SWD_OK) return FA_ERR_SWD;
+    /* 放行执行: 必须先用 C_MASKINTS 屏蔽目标中断再清 C_HALT.
+     * 目标应用通常开着 SysTick/其它中断, 若屏蔽前就运行, 中断会插到算法
+     * 执行中间去跑目标应用的中断服务程序 (其 RAM 已被算法占用), 表现为
+     * 算法"返回怪值". */
+    if (SWD_Mem_Write32(DHCSR, DHCSR_KEY | 0xBu) != SWD_OK) return FA_ERR_SWD;
+    if (SWD_Mem_Write32(DHCSR, DHCSR_KEY | 0x9u) != SWD_OK) return FA_ERR_SWD;
 
     /* 等待函数返回到 BKPT 而停机 */
     t0 = BSP_Millis();
@@ -106,8 +134,21 @@ uint8_t FlashAlgo_Call(const flash_algo_t *algo, uint32_t entry,
         }
     }
 
+    /* 停机完成: 解掉中断屏蔽, 回到普通调试停机态 */
+    (void)SWD_Mem_Write32(DHCSR, DHCSR_KEY | 0x3u);
+
     /* R0 = 算法返回值 (0=成功) */
     if ((r = core_reg_read(0, &v)) != FA_OK) return r;
+
+    /* 诊断: 只在 Init 上打印, 避免每页编程都刷日志 */
+    if (is_init) {
+        uint32_t dh = 0;
+        if (SWD_Mem_Read32(DHCSR, &dh) == SWD_OK) {
+            Log_Str("ALGST "); Log_Hex(dh);
+            Log_Str(" r0 ");   Log_Hex(v); Log_Str("\n");
+        }
+    }
+
     if (ret) *ret = v;
     return (v == 0) ? FA_OK : FA_ERR_RETVAL;
 }

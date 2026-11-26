@@ -36,6 +36,7 @@ except ImportError:
 HDR = b"\xAA\x55"
 CMD_PING       = 0x01
 CMD_GET_INFO   = 0x02
+CMD_GET_VERSION = 0x03
 CMD_IMG_BEGIN  = 0x10
 CMD_IMG_DATA   = 0x11
 CMD_IMG_END    = 0x12
@@ -69,6 +70,17 @@ SWD_ERR_NAMES = {
     5: "DPIDR不匹配(非Cortex-M目标或信号异常)",
     6: "调试电源域未就绪",
 }
+
+
+def fmt_ver(v):
+    """数值版本号 -> 可读文本 (新编码 主*10000+次*100+修订, 兼容旧小整数)"""
+    if v is None:
+        return "?"
+    if v == 0:
+        return "0(调试版)"
+    if v < 1000:
+        return str(v)
+    return f"{v // 10000}.{(v // 100) % 100}.{v % 100}"
 
 
 def crc16(data: bytes, crc: int = 0xFFFF) -> int:
@@ -139,8 +151,23 @@ class Prog:
         assert st == 0 and len(pl) >= 19, f"GET_INFO 失败 status={st}"
         valid = pl[0]
         length, crc32, load, cap = struct.unpack("<IIII", pl[1:17])
+        # 扩展字段 (老固件只有前 19 字节, 缺失时给默认值)
+        fkb = struct.unpack("<I", pl[19:23])[0] if len(pl) >= 23 else 0
+        burn = struct.unpack("<I", pl[23:27])[0] if len(pl) >= 27 else 0
+        chip = struct.unpack("<I", pl[27:31])[0] if len(pl) >= 32 else 0xFFFFFFFF
+        trailer = pl[31] if len(pl) >= 32 else 0
+        # 应用固件识别码/版本 (GET_INFO >= 40 字节才有)
+        fw_ver = struct.unpack("<I", pl[32:36])[0] if len(pl) >= 36 else None
+        fw_magic = struct.unpack("<I", pl[36:40])[0] if len(pl) >= 40 else None
         return dict(valid=valid, length=length, crc32=crc32,
-                    load=load, capacity=cap, state=pl[17], result=pl[18])
+                    load=load, capacity=cap, state=pl[17], result=pl[18],
+                    flash_kb=fkb, burn_count=burn, chip_code=chip,
+                    trailer=trailer, fw_version=fw_ver, fw_magic=fw_magic)
+
+    def version(self) -> str:
+        st, pl = self.cmd(CMD_GET_VERSION)
+        assert st == 0, f"GET_VERSION 失败 status={st}"
+        return pl.decode("ascii", "replace")
 
     def status(self):
         st, pl = self.cmd(CMD_GET_STATUS)
@@ -159,7 +186,10 @@ class Prog:
 
     def flash(self, data: bytes, load_addr: int = 0x08000000):
         crc = zlib.crc32(data) & 0xFFFFFFFF
-        st, _ = self.cmd(CMD_IMG_BEGIN, struct.pack("<III", len(data), crc, load_addr))
+        # IMG_BEGIN 现在要求 16B 头: len / crc / load / trailer
+        # (trailer = 随文件携带的尾部信息长度, 这里没有附带信息, 填 0)
+        st, _ = self.cmd(CMD_IMG_BEGIN,
+                         struct.pack("<IIII", len(data), crc, load_addr, 0))
         if st == 1:
             raise RuntimeError("参数被拒(镜像过大? 设备容量不足)")
         if st != 0:
@@ -211,8 +241,13 @@ def print_status(port):
     try:
         s = pr.status()
         i = pr.info()
+        try:
+            ver = pr.version()
+        except Exception:
+            ver = "?"
     finally:
         pr.close()
+    print(f"设备固件:   {ver}")
     print(f"状态:       {STATE_NAMES.get(s['state'], s['state'])}")
     print(f"上次结果:   {RESULT_NAMES.get(s['result'], s['result'])}")
     print(f"错误码:     {s['err'] & 0xFF} ({ERR_NAMES.get(s['err'] & 0xFF, '未知')})")
@@ -223,8 +258,14 @@ def print_status(port):
     print(f"目标 DPIDR: 0x{s['dpidr']:08X}  DBGMCU_ID: 0x{s['tid']:08X}")
     if i["valid"]:
         print(f"镜像:       {i['length']} 字节 @ 0x{i['load']:08X}, CRC32=0x{i['crc32']:08X}")
+        if i.get("chip_code", 0xFFFFFFFF) != 0xFFFFFFFF:
+            print(f"目标芯片码: 0x{i['chip_code']:08X}")
     else:
         print(f"镜像:       无 (容量 {i['capacity']} 字节)")
+    if i.get("fw_version") is not None:
+        print(f"固件版本:   {fmt_ver(i['fw_version'])}  "
+              f"识别码: 0x{(i.get('fw_magic') or 0):08X}")
+        print(f"烧录计数:   {i['burn_count']} 次 (本机流水记录)")
 
 
 def interactive():
