@@ -31,8 +31,10 @@
 """
 import contextlib
 import io
+import math
 import os
 import queue
+import struct
 import threading
 import time
 import tkinter as tk
@@ -71,15 +73,48 @@ STATE_TXT = {S_NO_DEV: "设备未连接 (自动重连中…)",
              S_FAIL:   "烧录失败 ✗"}
 
 
+def _wav_bytes(segments, rate=16000, vol=0.4):
+    """把 [(频率Hz, 毫秒), ...] 合成一段 16bit 单声道 WAV。
+    相位跨段连续 -> 音调切换处无间隙/咔哒 (Beep 两连音"不连续"正源于相位跳变)。"""
+    pcm = bytearray()
+    phase = 0.0
+    for freq, ms in segments:
+        step = 2.0 * math.pi * freq / rate
+        for _ in range(int(rate * ms / 1000)):
+            pcm += struct.pack("<h", int(vol * math.sin(phase) * 32767))
+            phase += step
+    data = bytes(pcm)
+    return (b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVEfmt " +
+            struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16) +
+            b"data" + struct.pack("<I", len(data)) + data)
+
+
+def _play(segments):
+    """后台线程播放提示音, 不阻塞 GUI 主线程 (winsound.Beep 同步阻塞会卡住界面)。
+    注意: winsound 从内存播放 (SND_MEMORY) 不支持 SND_ASYNC, 必须在后台线程里
+    同步播放; 波形相位跨段连续, 双音无咔哒。"""
+    if not winsound:
+        return
+
+    def _run():
+        try:
+            winsound.PlaySound(_wav_bytes(segments), winsound.SND_MEMORY)
+        except Exception:
+            for f, ms in segments:       # 个别系统不支持内存 wav 时回退 Beep
+                try:
+                    winsound.Beep(f, ms)
+                except Exception:
+                    pass
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def beep_ok():
-    if winsound:
-        winsound.Beep(1568, 120)
-        winsound.Beep(2093, 180)
+    _play([(1568, 120), (2093, 180)])    # 上行双音: 成功 (连贯无咔哒)
 
 
 def beep_fail():
-    if winsound:
-        winsound.Beep(392, 350)
+    _play([(392, 350)])                  # 单低音: 失败
 
 
 class Worker(threading.Thread):
@@ -186,7 +221,9 @@ class Worker(threading.Thread):
     # ---- 轮询烧录器: 心跳 / 设备镜像信息 / 烧录结果回报 ----
     def poll_device(self, app, force=False):
         now = time.time()
-        if not force and (now - self.t_status) < STATUS_S:
+        # 烧录中加快轮询让进度条更顺滑; 空闲时 STATUS_S 轮询兼作心跳
+        interval = 0.15 if self.state == S_PROG else STATUS_S
+        if not force and (now - self.t_status) < interval:
             return None
         self.t_status = now
         try:
@@ -212,6 +249,16 @@ class Worker(threading.Thread):
         if st.get("host_online") is not None and st["host_online"] != self.host_on:
             self.host_on = st["host_online"]
             self.emit("host", on=bool(st["host_online"]))
+
+        # 设备侧自动烧录 (插入目标板/烧录针触发): 把设备进度同步到界面进度条。
+        # 上位机主动烧录 (run_offline/run_stream/run_upload) 各自已报进度,
+        # 且它们执行期间不会调用到这里, 不会重复。
+        if st["state"] == ST_PROG:
+            if self.state != S_PROG:
+                self.set_state(S_PROG)         # 黄灯 + "烧录中" + 禁用烧录按钮
+            total = int((self.dev or {}).get("length") or 0)
+            if total:
+                self.emit("progress", done=st["progress"], total=total)
 
         seq = st.get("burn_seq")
         if seq is None:
