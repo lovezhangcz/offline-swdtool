@@ -39,6 +39,10 @@ HDR_LEN = 48
 CHIP_TRAILER_LEN = 68          # chip_code(4) + reserved(64)
 RESERVED_LEN = 64
 
+# 保护配置标志 (存放在 reserved 第 0 字节, 随 trailer 一起进入烧录器)
+FLAG_UNLOCK = 0x01             # bit0: 烧录前自动解除读保护 (会整片擦除)
+FLAG_LOCK   = 0x02             # bit1: 烧录并校验通过后上锁 RDP Level 1
+
 # 目标芯片代码 (本项目内部统一编制)
 CHIP_AUTO = 0x00000000
 CHIP_STM32F1 = 0x00000001
@@ -46,6 +50,7 @@ CHIP_GD32F1X0 = 0x00000002
 CHIP_GD32F303 = 0x00000003
 CHIP_STM32F4 = 0x00000004
 CHIP_APM32M4 = 0x00000005
+CHIP_STM32F030 = 0x00000006
 CHIP_NAMES = {
     CHIP_AUTO:    "自动识别",
     CHIP_STM32F1: "STM32F1 系列",
@@ -53,10 +58,11 @@ CHIP_NAMES = {
     CHIP_GD32F303: "GD32F303",
     CHIP_STM32F4: "STM32F4",
     CHIP_APM32M4: "APM32-M4",
+    CHIP_STM32F030: "STM32F030",
 }
 # 制作文件时下拉框顺序
 CHIP_CHOICES = [CHIP_AUTO, CHIP_STM32F1, CHIP_GD32F1X0,
-                CHIP_GD32F303, CHIP_STM32F4, CHIP_APM32M4]
+                CHIP_GD32F303, CHIP_STM32F4, CHIP_APM32M4, CHIP_STM32F030]
 
 
 def chip_name(code):
@@ -257,15 +263,17 @@ def merge_images(items):
     return base, bytes(out)
 
 
-def make_bytes(image, chip_code=CHIP_AUTO, load_addr=0x08000000):
-    """把原始镜像打包成 .aesbin 内容"""
+def make_bytes(image, chip_code=CHIP_AUTO, load_addr=0x08000000, flags=0):
+    """把原始镜像打包成 .aesbin 内容
+    flags: 保护配置 (FLAG_UNLOCK/FLAG_LOCK), 写入 reserved 第 0 字节"""
     if not image:
         raise ValueError("镜像为空")
     head = image[:8]
     if head == MAGIC:
         raise ValueError("输入看起来已经是 .aesbin 文件")
+    reserved = bytes([flags & 0xFF]) + b"\x00" * (RESERVED_LEN - 1)
     plain = (bytes(image) + struct.pack("<I", chip_code & 0xFFFFFFFF) +
-             b"\x00" * RESERVED_LEN)
+             reserved)
     iv = os.urandom(16)
     body = encrypt_cbc(AES_KEY, iv, plain)
     hdr = (MAGIC + bytes([VERSION, ALG_AES128_CBC]) +
@@ -277,8 +285,8 @@ def make_bytes(image, chip_code=CHIP_AUTO, load_addr=0x08000000):
     return hdr + body
 
 
-def make_file(path, image, chip_code=CHIP_AUTO, load_addr=0x08000000):
-    data = make_bytes(image, chip_code, load_addr)
+def make_file(path, image, chip_code=CHIP_AUTO, load_addr=0x08000000, flags=0):
+    data = make_bytes(image, chip_code, load_addr, flags)
     with open(path, "wb") as f:
         f.write(data)
     return dict(path=path, size=len(data), image_len=len(image),
@@ -314,8 +322,8 @@ def parse_bytes(data):
     chip_code = struct.unpack("<I", plain[-CHIP_TRAILER_LEN:-RESERVED_LEN])[0]
     reserved = plain[-RESERVED_LEN:]
     return dict(image=image, chip_code=chip_code, reserved=reserved,
-                load_addr=load_addr, trailer=plain[-CHIP_TRAILER_LEN:],
-                packed_len=len(data))
+                flags=reserved[0], load_addr=load_addr,
+                trailer=plain[-CHIP_TRAILER_LEN:], packed_len=len(data))
 
 
 def load_file(path):

@@ -1,0 +1,45 @@
+/* 由 tools/flm2blob.py 自动生成, 请勿手改
+ * 来源: STM32F0xx_128.FLM
+ * 设备: STM32F0xx 128kB Flash  flash=0x08000000+0x20000  page=1024B
+ * sectors: 0x0+0x400
+ */
+#include "board.h"          /* TARGET_CHIP 选择 */
+#include "flash_blob.h"
+
+#if (TARGET_CHIP == TARGET_CHIP_STM32F030) || (TARGET_CHIP == TARGET_CHIP_AUTO)
+
+static const uint32_t flash_code[] = {
+    0xE00ABE00, 0x062D780D, 0x24084068, 0xD3000040, 0x1E644058, 0x1C49D1FA, 0x2A001E52, 0x4770D1F2,
+    0x49454846, 0x49466041, 0x21006041, 0x68C16001, 0x43112214, 0x69C060C1, 0xD4060740, 0x49414842,
+    0x21066001, 0x49416041, 0x20006081, 0x483B4770, 0x22806901, 0x61014311, 0x47702000, 0x4837B530,
+    0x241468C1, 0x60C14321, 0x25046901, 0x61014329, 0x22406901, 0x61014311, 0x4A334935, 0x6011E000,
+    0x07DB68C3, 0x6901D1FB, 0x610143A9, 0x422168C1, 0x68C1D004, 0x60C14321, 0xBD302001, 0xBD302000,
+    0x4926B530, 0x231468CA, 0x60CA431A, 0x2402690A, 0x610A4322, 0x69086148, 0x43102240, 0x48246108,
+    0xE0004A21, 0x68CD6010, 0xD1FB07ED, 0x43A06908, 0x68C86108, 0xD0034018, 0x431868C8, 0x200160C8,
+    0xB5F0BD30, 0x1C494D15, 0x68EB0849, 0x24040049, 0x60EB4323, 0x4C162714, 0x692BE01A, 0x43332601,
+    0x8813612B, 0x4B108003, 0x601CE000, 0x07F668EE, 0x692BD1FB, 0x005B085B, 0x68EB612B, 0xD004423B,
+    0x433868E8, 0x200160E8, 0x1C80BDF0, 0x1E891C92, 0xD1E22900, 0xBDF02000, 0x45670123, 0x40022000,
+    0xCDEF89AB, 0x00005555, 0x40003000, 0x00000FFF, 0x0000AAAA, 0x00000000,
+};
+
+const flash_algo_t FLASH_ALGO_STM32F0 = {
+    0x20000021u,  /* Init */
+    0x2000004Fu,  /* UnInit */
+    0x2000005Du,  /* EraseChip (0xFFFFFFFF=不支持) */
+    0x200000A1u,  /* EraseSector */
+    0x200000E3u,  /* ProgramPage */
+    { 0x20000001u, 0x20000154u, 0x20000958u },  /* BKPT / static_base(RW) / SP */
+    0x20000158u,  /* program_buffer */
+    0x20000000u,  /* algo_start */
+    sizeof(flash_code),
+    flash_code,
+    0x00000400u,  /* program_buffer_size = page_size */
+    0x08000000u,  /* flash_start */
+    0x00020000u,  /* flash_size */
+    0x00000400u,  /* sector_size (首扇区) */
+    100u,         /* prog_timeout_ms */
+    6000u,        /* erase_timeout_ms */
+    "STM32F0xx 128kB Flash",
+};
+
+#endif /* STM32F030 */

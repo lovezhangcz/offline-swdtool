@@ -519,23 +519,33 @@ uint8_t SWD_Mem_Read32(uint32_t addr, uint32_t *val)
 uint8_t SWD_Mem_ReadBlock(uint32_t addr, uint32_t *buf, uint32_t nwords)
 {
     uint8_t r;
-    uint32_t dummy;
 
-    if (nwords == 0) return SWD_OK;
-    r = swd_csw(CSW_32_INC);
-    if (r != SWD_OK) return r;
-    r = SWD_AP_Write(AP_TAR, addr);
-    if (r != SWD_OK) return r;
+    /* AHB-AP 的 DRW 自增在 1KB 边界回绕, 跨边界必须重写 TAR 分段 */
+    while (nwords) {
+        uint32_t n = (0x400u - (addr & 0x3FFu)) >> 2;
+        uint32_t left, dummy;
+        if (n > nwords) n = nwords;
+        r = swd_csw(CSW_32_INC);
+        if (r != SWD_OK) return r;
+        r = SWD_AP_Write(AP_TAR, addr);
+        if (r != SWD_OK) return r;
 
-    /* 首次读 DRW 仅用于启动流水, 返回值丢弃; 随后每次读回上一地址数据 */
-    r = swd_transfer_retry(swd_make_req(1, 1, (uint8_t)((AP_DRW >> 2) & 3u)), &dummy, 0);
-    if (r != SWD_OK) return r;
-    while (--nwords) {
-        r = swd_transfer_retry(swd_make_req(1, 1, (uint8_t)((AP_DRW >> 2) & 3u)), buf, 0);
+        /* 首次读 DRW 仅用于启动流水, 返回值丢弃; 随后每次读回上一地址数据 */
+        r = swd_transfer_retry(swd_make_req(1, 1, (uint8_t)((AP_DRW >> 2) & 3u)), &dummy, 0);
+        if (r != SWD_OK) return r;
+        left = n;
+        while (--left) {
+            r = swd_transfer_retry(swd_make_req(1, 1, (uint8_t)((AP_DRW >> 2) & 3u)), buf, 0);
+            if (r != SWD_OK) return r;
+            buf++;
+        }
+        r = SWD_DP_Read(0xCu, buf);              /* 最后一个字经 RDBUFF */
         if (r != SWD_OK) return r;
         buf++;
+        addr += n * 4u;
+        nwords -= n;
     }
-    return SWD_DP_Read(0xCu, buf);              /* 最后一个字经 RDBUFF */
+    return SWD_OK;
 }
 
 /* 块写: TAR 地址自增, 连续写 DRW (用于下载烧录算法到目标 RAM) */
@@ -543,17 +553,25 @@ uint8_t SWD_Mem_WriteBlock(uint32_t addr, const uint32_t *buf, uint32_t nwords)
 {
     uint8_t r;
 
-    if (nwords == 0) return SWD_OK;
-    r = swd_csw(CSW_32_INC);
-    if (r != SWD_OK) return r;
-    r = SWD_AP_Write(AP_TAR, addr);
-    if (r != SWD_OK) return r;
-
-    while (nwords--) {
-        r = swd_transfer_retry(swd_make_req(1, 0, (uint8_t)((AP_DRW >> 2) & 3u)),
-                               (uint32_t *)buf, 1);
+    /* AHB-AP 的 DRW 自增在 1KB 边界回绕, 跨边界必须重写 TAR 分段 */
+    while (nwords) {
+        uint32_t n = (0x400u - (addr & 0x3FFu)) >> 2;
+        uint32_t left;
+        if (n > nwords) n = nwords;
+        r = swd_csw(CSW_32_INC);
         if (r != SWD_OK) return r;
-        buf++;
+        r = SWD_AP_Write(AP_TAR, addr);
+        if (r != SWD_OK) return r;
+
+        left = n;
+        while (left--) {
+            r = swd_transfer_retry(swd_make_req(1, 0, (uint8_t)((AP_DRW >> 2) & 3u)),
+                                   (uint32_t *)buf, 1);
+            if (r != SWD_OK) return r;
+            buf++;
+        }
+        addr += n * 4u;
+        nwords -= n;
     }
     return SWD_OK;
 }
@@ -617,11 +635,13 @@ uint8_t SWD_Connect(uint32_t *dpidr)
         swd_idle();
 
         r = SWD_DP_Read(0x0u, &v);
-        if (r == SWD_OK && (v & 0x0FFFFFFFu) == 0x0BA01477u) break;  /* M3/M4 DP */
+        if (r == SWD_OK && ((v & 0x0FFFFFFFu) == 0x0BA01477u ||     /* M3/M4 DP */
+                            (v & 0x0FFFFFFFu) == 0x0BC11477u)) break;/* M0 DP (STM32F0) */
         if (attempt < 7u) BSP_DelayMs(20);
     }
     if (r != SWD_OK) return r;
-    if ((v & 0x0FFFFFFFu) != 0x0BA01477u) {      /* 掩掉 Revision, M0 等其它 DP 拒绝 */
+    if ((v & 0x0FFFFFFFu) != 0x0BA01477u &&      /* 掩掉 Revision, 接受 M3/M4/M0 */
+        (v & 0x0FFFFFFFu) != 0x0BC11477u) {
         *dpidr = v;
         return SWD_ERR_IDCODE;
     }

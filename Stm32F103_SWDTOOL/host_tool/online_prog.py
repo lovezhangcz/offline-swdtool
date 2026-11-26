@@ -605,6 +605,15 @@ class MakeAesbinDialog(tk.Toplevel):
         ttk.Combobox(cf, values=vals, textvariable=self.chip_var,
                      state="readonly", width=30).pack(side="left", padx=6)
 
+        pf = tk.Frame(self)
+        pf.pack(fill="x", padx=12, pady=(4, 0))
+        self.var_unlock = tk.BooleanVar(value=False)
+        self.var_lock = tk.BooleanVar(value=False)
+        tk.Checkbutton(pf, text="自动解除读保护 (烧录前, 整片擦除)",
+                       variable=self.var_unlock).pack(side="left")
+        tk.Checkbutton(pf, text="烧录后上锁 (RDP Level 1)",
+                       variable=self.var_lock).pack(side="left", padx=(12, 0))
+
         tk.Label(self, text="说明: hex 文件按文件内地址自动识别偏移 (不可改); "
                             "bin 文件可手动填写偏移; 两段地址不能重叠, 空隙填 0xFF。",
                  fg="#606060", justify="left",
@@ -696,6 +705,8 @@ class MakeAesbinDialog(tk.Toplevel):
             messagebox.showerror("镜像无效", str(e))
             return
         code = int(self.chip_var.get().split()[0], 16)
+        flags = ((aesbin.FLAG_UNLOCK if self.var_unlock.get() else 0) |
+                 (aesbin.FLAG_LOCK if self.var_lock.get() else 0))
         name = os.path.splitext(
             os.path.basename(self.slots[0]["path"] or "firmware"))[0]
         out = filedialog.asksaveasfilename(
@@ -705,16 +716,21 @@ class MakeAesbinDialog(tk.Toplevel):
         if not out:
             return
         try:
-            r = aesbin.make_file(out, merged, code, base)
+            r = aesbin.make_file(out, merged, code, base, flags=flags)
         except Exception as e:
             messagebox.showerror("打包失败", str(e))
             return
+        prot = []
+        if flags & aesbin.FLAG_UNLOCK:
+            prot.append("自动解除读保护")
+        if flags & aesbin.FLAG_LOCK:
+            prot.append("烧录后上锁(Level1)")
         messagebox.showinfo(
             "完成",
             "已生成: %s\n\n镜像范围: 0x%08X ~ 0x%08X (%d 字节)\n"
-            "目标芯片: %s\n文件大小: %d 字节"
+            "目标芯片: %s\n保护配置: %s\n文件大小: %d 字节"
             % (out, base, base + len(merged), len(merged),
-               aesbin.chip_name(code), r["size"]))
+               aesbin.chip_name(code), ", ".join(prot) or "无", r["size"]))
 
 
 class App(tk.Tk):
@@ -760,7 +776,8 @@ class App(tk.Tk):
         self.cb_stream = tk.Checkbutton(fwf, text="启用流水烧录",
                                         variable=self.stream_var,
                                         command=self._on_stream_toggle)
-        self.cb_stream.pack(side="right")
+        # 流水烧录入口暂时隐藏 (默认使用烧录器离线镜像模式)
+        # self.cb_stream.pack(side="right")
 
         self.lb_fw = tk.Label(self, text="未选择 (支持 .bin / .hex / .aesbin)",
                               anchor="w", fg="#606060")
@@ -847,6 +864,11 @@ class App(tk.Tk):
             notes.append("aesbin 已解密")
         if meta["chip_code"] is not None:
             notes.append("芯片: %s" % aesbin.chip_name(meta["chip_code"]))
+        flags = (meta.get("reserved") or b"\x00")[0]
+        if flags & aesbin.FLAG_UNLOCK:
+            notes.append("自动解除保护")
+        if flags & aesbin.FLAG_LOCK:
+            notes.append("烧后上锁")
         if notes:
             txt += "  [" + ", ".join(notes) + "]"
         self.lb_fw.config(text=txt, fg="#000000")

@@ -43,5 +43,6 @@ extern const flash_algo_t FLASH_ALGO_GD32F303;   /* GD32F303 (2KB 扇区)*/
 extern const flash_algo_t FLASH_ALGO_APM32F40X;  /* 极海 APM32F405/407 (Cortex-M4F,
                                                     借 STM32F4xx_1024.FLM,
                                                     同样适用于真 STM32F4) */
+extern const flash_algo_t FLASH_ALGO_STM32F0;    /* STM32F030 (Cortex-M0) */
 
 #endif

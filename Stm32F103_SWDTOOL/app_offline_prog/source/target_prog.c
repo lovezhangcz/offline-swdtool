@@ -26,6 +26,9 @@
 /* ---- STM32F1/GD32F1 DBGMCU ---- */
 #define DBG_IDCODE   0xE0042000u
 #define DBG_CR       0xE0042004u
+#define DBG_IDCODE_F0 0x40015800u   /* STM32F0 (Cortex-M0) DBGMCU_IDCODE */
+#define DBG_APB1_FZ_F0 0x40015808u  /* STM32F0 看门狗冻结位 (APB1_FZ) */
+#define DPIDR_M0(dp)   (((dp) & 0x0FFFFFFFu) == 0x0BC11477u)  /* Cortex-M0 DP */
 #define DBG_IWDG_STOP  0x00000100u
 #define DBG_WWDG_STOP  0x00000200u
 /* ---- STM32F4/APM32F4 DBGMCU (冻结位在 APB1_FZ) ---- */
@@ -34,6 +37,29 @@
 #define FZ_WWDG_STOP     (1u << 9)
 /* ---- GD32 FMC 产品 ID ---- */
 #define FMC_PID        0x40022100u
+
+/* ---- STM32F1/GD32/APM32 FPEC (读保护 RDP 操作, 参考 blackmagic stm32f1.c) ---- */
+#define FPEC_BASE      0x40022000u
+#define FPEC_KEYR      (FPEC_BASE + 0x04u)
+#define FPEC_OPTKEYR   (FPEC_BASE + 0x08u)
+#define FPEC_SR        (FPEC_BASE + 0x0Cu)
+#define FPEC_CR        (FPEC_BASE + 0x10u)
+#define FPEC_OBR       (FPEC_BASE + 0x1Cu)
+#define FPEC_KEY1      0x45670123u
+#define FPEC_KEY2      0xCDEF89ABu
+#define FPEC_CR_OPTPG  (1u << 4)
+#define FPEC_CR_OPTER  (1u << 5)
+#define FPEC_CR_STRT   (1u << 6)
+#define FPEC_CR_OPTWRE (1u << 9)
+#define FPEC_SR_BSY    (1u << 0)
+#define FPEC_OBR_RDPRT (1u << 1)
+#define OBP_RDP        0x1FFFF800u
+#define RDP_UNLOCK_KEY 0x5AA5u    /* 无保护 (值0xA5 + 补码0x5A) */
+#define RDP_LOCK_VAL   0x0000u    /* RDP Level 1 (任何 != 0xA5 的低字节值) */
+
+/* 镜像 trailer 携带的保护配置位 (与上位机 aesbin.FLAG_* 对应) */
+#define IMG_FLAG_UNLOCK 0x01u   /* 烧录前自动解除读保护 (整片擦除) */
+#define IMG_FLAG_LOCK   0x02u   /* 烧录并校验通过后上锁 RDP Level 1 */
 
 /* 按 board.h 的 TARGET_CHIP 选择烧录算法 (AUTO 时由 target_id_check 运行期选定) */
 #if TARGET_CHIP == TARGET_CHIP_AUTO
@@ -101,6 +127,10 @@ static uint8_t target_id_check(uint32_t idcode)
                dev == 0x428u || dev == 0x430u) {  /* STM32F1 其它容量 */
         s_active_algo = &FLASH_ALGO_STM32F1;
         name = "STM32F1";
+    } else if (dev == 0x440u || dev == 0x442u) {  /* STM32F030 (Cortex-M0)
+                                                     DEV_ID 0x440, F030xC=0x442 */
+        s_active_algo = &FLASH_ALGO_STM32F0;
+        name = "STM32F030";
     } else {
         return TP_ERR_IDCODE;                     /* 未支持的芯片 */
     }
@@ -167,6 +197,9 @@ static void freeze_wdog(const flash_algo_t *algo)
     if (algo == &FLASH_ALGO_APM32F40X) {
         if (SWD_Mem_Read32(DBG_APB1_FZ, &v) == SWD_OK)
             (void)SWD_Mem_Write32(DBG_APB1_FZ, v | FZ_IWDG_STOP | FZ_WWDG_STOP);
+    } else if (algo == &FLASH_ALGO_STM32F0) {   /* F0: APB1_FZ @0x40015808, 位同 F1 */
+        if (SWD_Mem_Read32(DBG_APB1_FZ_F0, &v) == SWD_OK)
+            (void)SWD_Mem_Write32(DBG_APB1_FZ_F0, v | DBG_IWDG_STOP | DBG_WWDG_STOP);
     } else {
         if (SWD_Mem_Read32(DBG_CR, &v) == SWD_OK)
             (void)SWD_Mem_Write32(DBG_CR, v | DBG_IWDG_STOP | DBG_WWDG_STOP);
@@ -186,15 +219,99 @@ static uint8_t target_attach(void)
         g_status.swd_err = r;
         if (r == SWD_OK) {
             g_status.target_dpidr = v;
-            if (SWD_Mem_Read32(DBG_IDCODE, &v) == SWD_OK) {
-                g_status.target_idcode = v;
-                return target_id_check(v);
+            /* Cortex-M0 (STM32F0, DPIDR 0x0BC11477) 的 DBGMCU 在 0x40015800,
+               与 F1/F4 的 0xE0042000 不同, 按 DP 区分 */
+            {
+                uint32_t dbg = ((v & 0x0FFFFFFFu) == 0x0BC11477u) ? DBG_IDCODE_F0 : DBG_IDCODE;
+                if (SWD_Mem_Read32(dbg, &v) == SWD_OK) {
+                    g_status.target_idcode = v;
+                    return target_id_check(v);
+                }
             }
         }
         SWD_GPIO_Release();
         if (i < 3u) BSP_DelayMs(100);
     }
     return TP_ERR_CONNECT;
+}
+
+/* ================= 读保护 (RDP) 解除 / 上锁 =================
+   RDP Level1 时无法 halt / 读写 flash, 但 DP 可连、AHB 外设(FPEC)可访问,
+   因此解除保护在 target_attach 之前通过 FPEC 完成 (参考 blackmagic stm32f1.c)。 */
+
+/* 等待 FPEC 空闲 */
+static uint8_t fpec_wait(uint32_t ms)
+{
+    uint32_t t0 = BSP_Millis(), sr = 0;
+    for (;;) {
+        if (SWD_Mem_Read32(FPEC_SR, &sr) != SWD_OK) return TP_ERR_CONNECT;
+        if (!(sr & FPEC_SR_BSY)) return TP_OK;
+        if ((BSP_Millis() - t0) > ms) return TP_ERR_ALGO;
+    }
+}
+
+/* 解锁主 flash 控制 + option byte 写使能 (OPTWRE) */
+static void fpec_unlock(void)
+{
+    (void)SWD_Mem_Write32(FPEC_KEYR, FPEC_KEY1);
+    (void)SWD_Mem_Write32(FPEC_KEYR, FPEC_KEY2);
+    (void)SWD_Mem_Write32(FPEC_OPTKEYR, FPEC_KEY1);
+    (void)SWD_Mem_Write32(FPEC_OPTKEYR, FPEC_KEY2);
+}
+
+/* 当前是否读保护 (OBR.RDPRT) */
+static uint8_t rdp_is_protected(void)
+{
+    uint32_t obr = 0;
+    if (SWD_Mem_Read32(FPEC_OBR, &obr) != SWD_OK) return 0;
+    return (obr & FPEC_OBR_RDPRT) ? 1u : 0u;
+}
+
+/* 擦除 option byte 页 (F1 只能整页擦, 之后各 option 回擦除态) */
+static uint8_t rdp_option_erase(void)
+{
+    (void)SWD_Mem_Write32(FPEC_CR, FPEC_CR_OPTER | FPEC_CR_OPTWRE);
+    (void)SWD_Mem_Write32(FPEC_CR, FPEC_CR_STRT | FPEC_CR_OPTER | FPEC_CR_OPTWRE);
+    return fpec_wait(3000u);
+}
+
+/* 写 RDP 半字 (硬件自动生成补码) */
+static uint8_t rdp_write(uint16_t val)
+{
+    (void)SWD_Mem_Write32(FPEC_CR, FPEC_CR_OPTPG | FPEC_CR_OPTWRE);
+    if (SWD_Mem_Write16(OBP_RDP, val) != SWD_OK) return TP_ERR_CONNECT;
+    return fpec_wait(1000u);
+}
+
+/* 解除读保护 (Level1->0): 擦除 option + 写无保护键, 硬件整片擦除, 复位后生效。
+   返回前已复位目标并延时, 之后可重新 target_attach 烧录。 */
+static uint8_t rdp_unlock(void)
+{
+    uint8_t r;
+    fpec_unlock();
+    r = rdp_option_erase();
+    if (r != TP_OK) return r;
+    r = rdp_write(RDP_UNLOCK_KEY);
+    if (r != TP_OK) return r;
+    (void)SWD_Mem_Write32(AIRCR, 0x05FA0004u);   /* SYSRESETREQ: RDP0 生效 + 整片擦除 */
+    BSP_DelayMs(100);
+    SWD_GPIO_Release();
+    BSP_DelayMs(50);
+    Log_Str("RDP unlocked\n");
+    return TP_OK;
+}
+
+/* 上锁 RDP Level1: 擦除 option + 写保护值 (不擦除主 flash)。复位后生效(由调用者复位)。 */
+static uint8_t rdp_lock(void)
+{
+    uint8_t r;
+    fpec_unlock();
+    r = rdp_option_erase();
+    if (r != TP_OK) return r;
+    r = rdp_write(RDP_LOCK_VAL);
+    if (r != TP_OK) return r;
+    Log_Str("RDP locked(L1)\n");
+    return TP_OK;
 }
 
 /* 调一次烧录算法函数并解释结果 (FA_xxx -> TP_xxx) */
@@ -233,7 +350,7 @@ uint8_t TargetProg_Detect(void)
     SWD_ReleaseNRST();      /* 探测完毕, 让目标正常跑 */
     g_status.target_dpidr = dpidr;
 
-    if (SWD_Mem_Read32(DBG_IDCODE, &idcode) == SWD_OK)
+    if (SWD_Mem_Read32(DPIDR_M0(dpidr) ? DBG_IDCODE_F0 : DBG_IDCODE, &idcode) == SWD_OK)
         g_status.target_idcode = idcode;
 
     return TP_OK;    /* 保持连接, 由调用者决定后续 */
@@ -322,7 +439,7 @@ uint8_t TargetProg_Probe(uint32_t *dpidr, uint32_t *idcode)
     g_status.swd_err = r;
     g_status.target_dpidr = v;
     if (r == SWD_OK) {
-        if (SWD_Mem_Read32(DBG_IDCODE, idcode) == SWD_OK)
+        if (SWD_Mem_Read32(DPIDR_M0(v) ? DBG_IDCODE_F0 : DBG_IDCODE, idcode) == SWD_OK)
             g_status.target_idcode = *idcode;
 #if DBG_TOOLS
         {
@@ -360,11 +477,16 @@ static uint8_t tp_run_impl(uint32_t *err_addr)
     uint32_t addr, len, load;
     uint8_t  r;
     uint32_t crc;
+    uint8_t  img_flags = 0;
 
     if (err_addr) *err_addr = 0;
     if (!Storage_ImageValid()) return TP_ERR_NOIMAGE;
     load = h->load_addr;
     len  = h->length;
+    /* 镜像 trailer 携带的保护配置: reserved[0]=trailer长度, 需>=5 才含 flags 字节;
+       flags 在 trailer[4] (chip_code 之后第 1 字节), 与上位机 aesbin 对应 */
+    if (h->reserved[0] >= 5u)
+        img_flags = Storage_PayloadPtr()[h->length + 4u];
 
     /* 防止把 Intel HEX 文本当成固件烧进去 (例如直接拖 .hex 进 U 盘) */
     {
@@ -383,6 +505,19 @@ static uint8_t tp_run_impl(uint32_t *err_addr)
                 return TP_ERR_HEX;
             }
         }
+    }
+
+    /* 自动解除读保护: RDP Level1 时无法 halt/读写 flash, 必须在 target_attach 之前
+       通过 FPEC 擦除 option byte 解除 (整片擦除), 复位后再走正常烧录流程 */
+    if (img_flags & IMG_FLAG_UNLOCK) {
+        uint32_t dp = 0;
+        if (SWD_Connect(&dp) == SWD_OK) {
+            if (rdp_is_protected()) {
+                Log_Str("RDP unlock...\n");
+                (void)rdp_unlock();
+            }
+        }
+        SWD_GPIO_Release();
     }
 
     /* ---- 0. 先复位一次, 让目标处于"刚复位"状态 ----
@@ -517,7 +652,13 @@ static uint8_t tp_run_impl(uint32_t *err_addr)
     }
     if (crc != h->crc32) return TP_ERR_VERIFY;
 
-    /* ---- 6. 复位目标, 运行新固件 ---- */
+    /* 烧录并校验通过: 按需上锁 RDP Level1 (不擦除主 flash), 复位后生效 */
+    if (img_flags & IMG_FLAG_LOCK) {
+        if (rdp_lock() != TP_OK)
+            Log_Str("RDP lock fail\n");
+    }
+
+    /* ---- 6. 复位目标, 运行新固件 (上锁也在复位后生效) ---- */
     (void)SWD_Mem_Write32(DHCSR, 0xA05F0000u);   /* 解除停机 */
     (void)SWD_Mem_Write32(AIRCR, 0x05FA0004u);   /* SYSRESETREQ */
     BSP_DelayMs(50);

@@ -125,11 +125,21 @@ uint8_t FlashAlgo_Call(const flash_algo_t *algo, uint32_t entry,
         if (SWD_Mem_Read32(DHCSR, &v) != SWD_OK) return FA_ERR_SWD;
         if (v & S_HALT) break;
         if ((BSP_Millis() - t0) > timeout_ms) {
-            /* 超时: 把当前 PC 带出 (ret), 便于判断算法卡在哪/是否进了 HardFault */
-            uint32_t pc = 0;
+            /* 超时: 先强制停机再读 PC/LR (未停机时 DCRSR 读不出会得 0),
+               便于判断算法卡在哪/是否跑飞进了 HardFault */
+            uint32_t pc = 0, lr = 0, sp = 0, dh = 0, hfsr = 0, dfsr = 0;
+            (void)SWD_Mem_Write32(DHCSR, DHCSR_KEY | 0x3u);  /* C_DEBUGEN|C_HALT 强制停机 */
             (void)core_reg_read(15, &pc);
+            (void)core_reg_read(14, &lr);
+            (void)core_reg_read(13, &sp);
+            (void)SWD_Mem_Read32(DHCSR, &dh);
+            (void)SWD_Mem_Read32(0xE000ED2Cu, &hfsr);  /* HFSR */
+            (void)SWD_Mem_Read32(0xE000ED30u, &dfsr);  /* DFSR */
+            Log_Str("ALGTO pc="); Log_Hex(pc); Log_Str(" lr="); Log_Hex(lr);
+            Log_Str(" sp="); Log_Hex(sp); Log_Str(" dh="); Log_Hex(dh);
+            Log_Str(" hfsr="); Log_Hex(hfsr); Log_Str(" dfsr="); Log_Hex(dfsr);
+            Log_Str("\n");
             if (ret) *ret = pc;
-            (void)SWD_Mem_Write32(DHCSR, DHCSR_KEY | 0x3u);  /* 强制停机 */
             return FA_ERR_TIMEOUT;
         }
     }

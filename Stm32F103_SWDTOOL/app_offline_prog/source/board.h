@@ -110,7 +110,7 @@
 /* ------------------------------------------------------- 目标芯片选择 ---- */
 /* TARGET_CHIP_AUTO     : 自动识别 (默认)
  *   运行期按 SWD DPIDR + DBGMCU IDCODE (+ FMC_PID) 判定芯片, 并选用对应
- *   烧录算法; 四个算法 blob 全部编入 (约 +1KB Flash)。
+ *   烧录算法; 各算法 blob 全部编入。
  *   已实测通过的特征:
  *     GD32F303 : DPIDR 0x2BA01477 (M4)  DEV 0x414  REV 0x2104  2KB 扇区/512KB
  *     GD32 1KB : DPIDR 0x1BA01477 (M3)  DEV 0x410  PID 高字节 0x41
@@ -131,6 +131,7 @@
 #define TARGET_CHIP_GD32F1X0    2
 #define TARGET_CHIP_GD32F103    3
 #define TARGET_CHIP_GD32F303    4
+#define TARGET_CHIP_STM32F030   5
 
 #ifndef TARGET_CHIP
 #define TARGET_CHIP             TARGET_CHIP_AUTO   /* 当前: 自动识别 */
@@ -279,7 +280,7 @@ typedef struct {
 #define APP_FW_VERSION_MINOR  1
 #endif
 #ifndef APP_FW_VERSION_PATCH
-#define APP_FW_VERSION_PATCH  15
+#define APP_FW_VERSION_PATCH  41
 #endif
 
 #define APP_STR_(x)         #x
