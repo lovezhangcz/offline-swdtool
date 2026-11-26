@@ -1,0 +1,28 @@
+--cpu Cortex-M3
+".\obj_app_cdc\startup_stm32f10x_md.o"
+".\obj_app_cdc\system_stm32f10x.o"
+".\obj_app_cdc\main.o"
+".\obj_app_cdc\bsp.o"
+".\obj_app_cdc\crc.o"
+".\obj_app_cdc\storage.o"
+".\obj_app_cdc\proto.o"
+".\obj_app_cdc\target_prog.o"
+".\obj_app_cdc\flash_algo.o"
+".\obj_app_cdc\flash_algo_gd32f1x0.o"
+".\obj_app_cdc\flash_algo_gd32f303.o"
+".\obj_app_cdc\flash_algo_apm32f40x.o"
+".\obj_app_cdc\flash_algo_stm32f1.o"
+".\obj_app_cdc\swd_host.o"
+".\obj_app_cdc\usb_hw.o"
+".\obj_app_cdc\usb_cdc.o"
+".\obj_app_cdc\usb_msc.o"
+".\obj_app_cdc\usb_comp.o"
+".\obj_app_cdc\vfs.o"
+".\obj_app_cdc\log.o"
+".\obj_app_cdc\boot_main.o"
+".\obj_app_cdc\boot_flash.o"
+".\obj_app_cdc\boot_proto.o"
+--library_type=microlib --strict --scatter ".\obj_app_cdc\offline_prog_app_cdc.sct"
+--summary_stderr --info summarysizes --map --load_addr_map_info --callgraph --symbols
+--info sizes
+--list ".\list_app_cdc\offline_prog_app_cdc.map" -o .\obj_app_cdc\offline_prog_app_cdc.axf

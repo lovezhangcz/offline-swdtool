@@ -4,6 +4,7 @@
   * @brief 目标固件镜像存储: 内部 flash 擦写 (STM32F103 FPEC, 寄存器级)
   */
 #include "storage.h"
+#include "bsp.h"
 
 #define FLASH_KEY1   0x45670123u
 #define FLASH_KEY2   0xCDEF89ABu
@@ -41,7 +42,11 @@ static void flash_clear_flags(void)
 static uint8_t flash_wait(void)
 {
     uint32_t to = FLASH_TIMEOUT_LOOP;
-    while ((FLASH->SR & FLASH_SR_BSY) && --to) { }
+    while ((FLASH->SR & FLASH_SR_BSY) && --to) {
+        /* 页擦除约 40ms, 连续擦除上百页 (U盘写大固件) 会超过 3.2s 的看门狗;
+           擦写都发生在 USB 中断里, 主循环没机会喂狗, 这里必须自己喂 */
+        WDT_Feed();
+    }
     if (to == 0) return STORAGE_ERR_FLASH;
 
     /* EOP 正常会立即置位; 个别兼容芯片不置 EOP 时最多再等约 2ms, 不据此判错 */
@@ -217,5 +222,94 @@ uint32_t Storage_PayloadAddr(void)
 const uint8_t *Storage_PayloadPtr(void)
 {
     return (const uint8_t *)Storage_PayloadAddr();
+}
+
+/* ------------------------------------------------ 烧录流水记录区 ---------
+ * 独立 2KB (RECORD_BASE), 不占用镜像区, 随离线固件更新而擦除:
+ *   页 A (RECORD_BASE):
+ *     [0]      魔术字 0xA55A (已初始化标志)
+ *     [1..511] 流水槽位: 每成功烧录一次写一个半字 0x0000
+ *   页 B (RECORD_BASE + 1KB):
+ *     [0] 魔术字 0xA55A
+ *     [1] 翻页次数 (页 A 记满后 +1, 然后清空页 A)
+ * 累计成功次数 = 翻页次数 * 511 + 页 A 已用槽数
+ * 一个 1KB 页可覆盖 511 次, 页 B 每 511 次才擦一次, 磨损很小。 */
+#define REC_MAGIC      0xA55Au
+#define REC_PAGE_B     (RECORD_BASE + FLASH_PAGE_SIZE)
+#define REC_SLOT_MAX   (FLASH_PAGE_SIZE / 2u - 1u)   /* 511 */
+
+static uint16_t rec_rd(uint32_t addr)
+{
+    return *(volatile const uint16_t *)addr;
+}
+
+/* 页 A 已用的流水槽数 (遇到第一个非 0x0000 就停) */
+static uint32_t rec_marks(void)
+{
+    uint32_t i;
+    for (i = 1; i <= REC_SLOT_MAX; i++) {
+        if (rec_rd(RECORD_BASE + i * 2u) != 0x0000u) break;
+    }
+    return i - 1u;
+}
+
+uint8_t Storage_RecordErase(void)
+{
+    uint8_t r;
+    flash_unlock();
+    r = flash_erase_page(RECORD_BASE);
+    if (r == STORAGE_OK) r = flash_erase_page(REC_PAGE_B);
+    flash_lock();
+    return r;
+}
+
+uint32_t Storage_RecordCount(void)
+{
+    uint32_t rolls = 0;
+
+    if (rec_rd(RECORD_BASE) != REC_MAGIC) return 0;
+    if (rec_rd(REC_PAGE_B) == REC_MAGIC) rolls = rec_rd(REC_PAGE_B + 2u);
+    return rolls * REC_SLOT_MAX + rec_marks();
+}
+
+uint8_t Storage_RecordBurn(void)
+{
+    uint32_t marks;
+    uint16_t rolls = 0;
+    uint8_t  r = STORAGE_OK;
+
+    flash_unlock();
+
+    /* 首次使用: 两页都写魔术字, 保证后续计数可辨识 */
+    if (rec_rd(RECORD_BASE) != REC_MAGIC) {
+        r = flash_erase_page(RECORD_BASE);
+        if (r == STORAGE_OK) r = flash_write_half(RECORD_BASE, REC_MAGIC);
+        if (r == STORAGE_OK && rec_rd(REC_PAGE_B) != REC_MAGIC) {
+            r = flash_erase_page(REC_PAGE_B);
+            if (r == STORAGE_OK) r = flash_write_half(REC_PAGE_B, REC_MAGIC);
+            if (r == STORAGE_OK) r = flash_write_half(REC_PAGE_B + 2u, 0x0000u);
+        }
+        if (r != STORAGE_OK) { flash_lock(); return r; }
+    }
+
+    marks = rec_marks();
+    if (marks >= REC_SLOT_MAX) {
+        /* 页 A 记满: 先把页 B 的翻页次数 +1 (掉电也不会丢已满的这一页),
+           再清空页 A 重新开始流水 */
+        if (rec_rd(REC_PAGE_B) == REC_MAGIC) rolls = rec_rd(REC_PAGE_B + 2u);
+        if (rolls == 0xFFFFu) { flash_lock(); return STORAGE_ERR_FLASH; }
+        r = flash_erase_page(REC_PAGE_B);
+        if (r == STORAGE_OK) r = flash_write_half(REC_PAGE_B, REC_MAGIC);
+        if (r == STORAGE_OK) r = flash_write_half(REC_PAGE_B + 2u, (uint16_t)(rolls + 1u));
+        if (r == STORAGE_OK) r = flash_erase_page(RECORD_BASE);
+        if (r == STORAGE_OK) r = flash_write_half(RECORD_BASE, REC_MAGIC);
+        /* 本次这一笔也要记在刚清空的页 A 里, 否则进位那一次会少算 */
+        if (r == STORAGE_OK) r = flash_write_half(RECORD_BASE + 2u, 0x0000u);
+    } else {
+        r = flash_write_half(RECORD_BASE + (marks + 1u) * 2u, 0x0000u);
+    }
+
+    flash_lock();
+    return r;
 }
 #endif

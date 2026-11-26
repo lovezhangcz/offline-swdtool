@@ -36,4 +36,9 @@ uint32_t        Storage_PayloadAddr(void);
 const uint8_t  *Storage_PayloadPtr(void);
 void            Storage_SetImageName(const char *name, uint32_t len);
 
+/* ---- 烧录流水记录区 (独立 2KB: 页A 流水槽位 + 页B 翻页计数) ---- */
+uint8_t  Storage_RecordErase(void);   /* 清空记录 (离线固件更新时调用) */
+uint32_t Storage_RecordCount(void);   /* 累计成功烧录次数 */
+uint8_t  Storage_RecordBurn(void);    /* 记一次成功烧录, 满页自动进位 */
+
 #endif

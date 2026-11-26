@@ -1,0 +1,28 @@
+--cpu Cortex-M3
+".\obj_boot\startup_stm32f10x_md.o"
+".\obj_boot\system_stm32f10x.o"
+".\obj_boot\main.o"
+".\obj_boot\bsp.o"
+".\obj_boot\crc.o"
+".\obj_boot\storage.o"
+".\obj_boot\proto.o"
+".\obj_boot\target_prog.o"
+".\obj_boot\flash_algo.o"
+".\obj_boot\flash_algo_gd32f1x0.o"
+".\obj_boot\flash_algo_gd32f303.o"
+".\obj_boot\flash_algo_apm32f40x.o"
+".\obj_boot\flash_algo_stm32f1.o"
+".\obj_boot\swd_host.o"
+".\obj_boot\usb_hw.o"
+".\obj_boot\usb_cdc.o"
+".\obj_boot\usb_msc.o"
+".\obj_boot\usb_comp.o"
+".\obj_boot\vfs.o"
+".\obj_boot\log.o"
+".\obj_boot\boot_main.o"
+".\obj_boot\boot_flash.o"
+".\obj_boot\boot_proto.o"
+--library_type=microlib --strict --scatter ".\obj_boot\offline_prog_boot.sct"
+--summary_stderr --info summarysizes --map --load_addr_map_info --callgraph --symbols
+--info sizes
+--list ".\list_boot\offline_prog_boot.map" -o .\obj_boot\offline_prog_boot.axf

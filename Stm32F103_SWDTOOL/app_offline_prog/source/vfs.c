@@ -21,15 +21,16 @@
   *
   *   磁盘布局 (虚拟 FAT12):
   *     LBA 0   : BPB 引导扇区
-  *     LBA 1   : FAT 表
-  *     LBA 2   : 根目录
-  *     LBA 3..N: 数据区 (簇 2, 3, 4, ...)
+  *     LBA 1-2 : FAT 表 (2 个扇区, 支持到 682 簇 = 341KB 镜像区)
+  *     LBA 3   : 根目录
+  *     LBA 4..N: 数据区 (簇 2, 3, 4, ...)
   */
 #include "vfs.h"
 #include "usb_msc.h"
 #include "storage.h"
 #include "crc.h"
 #include "board.h"
+#include "log.h"
 
 #if USB_HAS_MSC
 
@@ -39,16 +40,21 @@
 
 #define VFS_SECTOR_SIZE       512u
 #define VFS_RESERVED_SECTORS  1u
-#define VFS_FAT_COUNT         1u
+/* 2 个 FAT 扇区: 1 个扇区只能描述 341 个簇 (约 170KB),
+   256KB 布局的镜像区有 382 个簇, 必须用 2 个扇区 */
+#define VFS_FAT_COUNT         2u
 #define VFS_ROOT_ENTRIES      16u
 #define VFS_SECTORS_PER_CLUSTER  1u
 
 /* 数据簇总数 = 存储区数据部分 / 每簇大小
  * 存储区数据部分 = 总存储区 - 第0页(头) */
 #define VFS_DATA_CLUSTERS     ((IMG_STORE_SIZE - FLASH_PAGE_SIZE) / VFS_SECTOR_SIZE)
-#define VFS_TOTAL_SECTORS     (VFS_RESERVED_SECTORS + VFS_FAT_COUNT + 1 + VFS_DATA_CLUSTERS)
 
-#define VFS_DATA_START_LBA    3u
+#define VFS_FAT_LBA           VFS_RESERVED_SECTORS
+#define VFS_ROOT_LBA          (VFS_FAT_LBA + VFS_FAT_COUNT)
+#define VFS_DATA_START_LBA    (VFS_ROOT_LBA + 1u)
+#define VFS_TOTAL_SECTORS     (VFS_DATA_START_LBA + VFS_DATA_CLUSTERS)
+
 #define VFS_FIRST_CLUSTER     2u
 
 /* 数据在存储区中的物理起始偏移 (第 0 页给头) */
@@ -340,38 +346,48 @@ static void read_bpb(uint8_t *buf)
     uint16_t total = VFS_TOTAL_SECTORS;
     buf[19] = (uint8_t)(total & 0xFF);
     buf[20] = (uint8_t)(total >> 8);
+    buf[22] = (uint8_t)(VFS_FAT_COUNT & 0xFFu);      /* 每 FAT 扇区数 */
+    buf[23] = (uint8_t)(VFS_FAT_COUNT >> 8);
     buf[510] = 0x55;
     buf[511] = 0xAA;
 }
 
-static void read_fat(uint8_t *buf)
+/* FAT12 表项写入 (12 位): 整张表先拼在内存里, 再按扇区拷出去,
+   避免表项跨扇区时被截断 */
+static uint8_t s_fat_img[VFS_FAT_COUNT * VFS_SECTOR_SIZE];
+
+static void fat_set(uint16_t cluster, uint16_t val)
+{
+    uint16_t off = (uint16_t)(cluster + (cluster >> 1));
+    if ((uint32_t)off + 1u >= sizeof(s_fat_img)) return;
+
+    if (cluster & 1u) {
+        s_fat_img[off]     = (uint8_t)((s_fat_img[off] & 0x0Fu) | ((val & 0x0Fu) << 4));
+        s_fat_img[off + 1] = (uint8_t)((val >> 4) & 0xFFu);
+    } else {
+        s_fat_img[off]     = (uint8_t)(val & 0xFFu);
+        s_fat_img[off + 1] = (uint8_t)((s_fat_img[off + 1] & 0xF0u) | ((val >> 8) & 0x0Fu));
+    }
+}
+
+static void read_fat(uint8_t *buf, uint32_t fat_idx)
 {
     uint32_t fw_size;
     uint16_t fw_clusters;
     uint16_t first_cluster;
     uint16_t i;
 
-    memset(buf, 0, VFS_SECTOR_SIZE);
+    memset(s_fat_img, 0, sizeof(s_fat_img));
 
     /* FAT[0] = 0xFF8, FAT[1] = 0xFFF */
-    buf[0] = 0xF8;
-    buf[1] = 0xFF;
-    buf[2] = 0x0F;
+    fat_set(0, 0x0FF8u);
+    fat_set(1, 0x0FFFu);
 
     /* README.TXT 固定占用最后一个簇 (单簇文件), 让主机不要把它分配给固件 */
-    {
-        uint16_t c   = VFS_README_CLUSTER;
-        uint16_t off = (uint16_t)(c + (c >> 1));
-        if (c & 1u) {
-            buf[off]     = (uint8_t)((buf[off] & 0x0Fu) | 0xF0u);
-            buf[off + 1] = 0xFFu;
-        } else {
-            buf[off]     = 0xFFu;
-            buf[off + 1] = (uint8_t)((buf[off + 1] & 0xF0u) | 0x0Fu);
-        }
-    }
+    fat_set(VFS_README_CLUSTER, 0x0FFFu);
 
     if (!Storage_ImageValid() || Storage_Header()->length == 0) {
+        memcpy(buf, s_fat_img + fat_idx * VFS_SECTOR_SIZE, VFS_SECTOR_SIZE);
         return;  /* 无固件, 数据簇全空闲 */
     }
 
@@ -392,21 +408,12 @@ static void read_fat(uint8_t *buf)
     /* 构造连续簇链 (假设文件连续存放 - Windows 小文件通常连续分配) */
     for (i = 0; i < fw_clusters; i++) {
         uint16_t cluster = (uint16_t)(first_cluster + i);
-        uint16_t next;
-        if (i == fw_clusters - 1) {
-            next = 0x0FFF;
-        } else {
-            next = (uint16_t)(cluster + 1);
-        }
-        uint16_t byte_off = cluster + (cluster >> 1);
-        if (cluster & 1) {
-            buf[byte_off]     = (uint8_t)((buf[byte_off] & 0x0F) | ((next & 0x0F) << 4));
-            buf[byte_off + 1] = (uint8_t)((next >> 4) & 0xFF);
-        } else {
-            buf[byte_off]     = (uint8_t)(next & 0xFF);
-            buf[byte_off + 1] = (uint8_t)((buf[byte_off + 1] & 0xF0) | ((next >> 8) & 0x0F));
-        }
+        uint16_t next = (i == (uint16_t)(fw_clusters - 1u))
+                        ? 0x0FFFu : (uint16_t)(cluster + 1u);
+        fat_set(cluster, next);
     }
+
+    memcpy(buf, s_fat_img + fat_idx * VFS_SECTOR_SIZE, VFS_SECTOR_SIZE);
 }
 
 static void read_rootdir(uint8_t *buf)
@@ -509,9 +516,9 @@ void VFS_ReadSector(uint32_t lba)
 
     if (lba == 0) {
         read_bpb(buf);
-    } else if (lba == 1) {
-        read_fat(buf);
-    } else if (lba == 2) {
+    } else if (lba >= VFS_FAT_LBA && lba < VFS_FAT_LBA + VFS_FAT_COUNT) {
+        read_fat(buf, lba - VFS_FAT_LBA);
+    } else if (lba == VFS_ROOT_LBA) {
         read_rootdir(buf);
     } else if (lba >= VFS_DATA_START_LBA && lba < VFS_TOTAL_SECTORS) {
         uint16_t cluster = (uint16_t)(lba - VFS_DATA_START_LBA + VFS_FIRST_CLUSTER);
@@ -664,7 +671,6 @@ static void parse_rootdir_for_fw(const uint8_t *rootdir)
 
 static void vfs_update_header(void)
 {
-    if (g_header_written) return;
     if (!g_fw_found || g_fw_size == 0) return;
 
     /* 计算 CRC32: 按首簇+连续簇的方式遍历数据 */
@@ -687,6 +693,25 @@ static void vfs_update_header(void)
         cluster++;  /* 假设连续分配 */
     }
     crc ^= 0xFFFFFFFFu;
+
+    /* 收尾可能在数据写完前就被主机触发 (TEST UNIT READY),
+       因此每次都重算 CRC; 只有头里的内容真的变了才重写第 0 页。 */
+    {
+        const img_hdr_t *h  = Storage_Header();
+        const uint8_t *nm   = (const uint8_t *)IMG_STORE_ADDR + FW_NAME_OFFSET;
+        const uint8_t *fc   = (const uint8_t *)IMG_STORE_ADDR + FW_FIRST_CLUSTER_OFFSET;
+        uint8_t nl = 0;
+        while (nl < FW_NAME_LEN && g_fw_name[nl] != 0) nl++;
+
+        if (h->magic == IMG_MAGIC && h->length == g_fw_size && h->crc32 == crc &&
+            h->load_addr == 0x08000000u &&
+            fc[0] == (uint8_t)(g_fw_first_cluster & 0xFF) &&
+            fc[1] == (uint8_t)(g_fw_first_cluster >> 8) &&
+            (nl == 0 || memcmp(nm, g_fw_name, nl) == 0)) {
+            g_header_written = 1;      /* 已经是最新内容, 不重复擦写 */
+            return;
+        }
+    }
 
     /* 构造第 0 页内容: 头(32B) + 文件名(64B) + 首簇号(2B) */
     uint8_t hdr_buf[FW_FIRST_CLUSTER_OFFSET + 2u];
@@ -761,6 +786,9 @@ static void vfs_update_header(void)
         if (name_len > 0 && memcmp(nm, g_fw_name, name_len) != 0) return;
     }
 
+    /* 换了离线固件: 该固件的烧录流水记录从头开始 (记录区在镜像区之前, 不冲突) */
+    (void)Storage_RecordErase();
+
     g_header_written = 1;
 }
 
@@ -773,7 +801,7 @@ void VFS_WriteSector(uint32_t lba)
     const uint8_t *buf = USB_MSC_GetWriteBuf();
 
     /* ---- 根目录写入: 解析文件名/大小/首簇 ---- */
-    if (lba == 2) {
+    if (lba == VFS_ROOT_LBA) {
         uint8_t  old_name[FW_NAME_LEN];
         uint8_t  old_len = 0;
         uint32_t old_size = 0;
@@ -868,20 +896,43 @@ void VFS_WriteSector(uint32_t lba)
             }
             if (tries >= 3u) {
                 /* 擦不干净就绝不能往这页编程 (写了也留不住) */
+                Log_Str("VFS erase fail "); Log_Dec(page_off); Log_Str("\n");
                 return;
             }
             g_pages_erased[page_idx >> 3] |= mask;
         }
 
         if (Storage_Write(store_offset, buf, VFS_SECTOR_SIZE) != STORAGE_OK) {
-            /* 编程失败: 重擦整页再写一次 (正常情况下不会走到这里) */
+            /* 编程失败: 正常情况下重擦整页再写一次即可。
+               但如果同一 1KB 页的另一半已经有数据, 重擦会把那半个扇区一起擦掉,
+               所以先确认另一半是空白才允许整页重擦。 */
+            const uint8_t *sib = (const uint8_t *)(IMG_STORE_ADDR +
+                                                   (store_offset ^ VFS_SECTOR_SIZE));
+            uint32_t i;
+            uint8_t blank = 1;
+
+            Log_Str("VFS write fail "); Log_Dec(store_offset); Log_Str("\n");
+            for (i = 0; i < VFS_SECTOR_SIZE; i++) {
+                if (sib[i] != 0xFFu) { blank = 0; break; }
+            }
+            if (!blank) {
+                /* 另一半有数据: 只能就地对同一地址再编一次 */
+                if (Storage_Write(store_offset, buf, VFS_SECTOR_SIZE) != STORAGE_OK) {
+                    Log_Str("VFS write fail2 "); Log_Dec(store_offset); Log_Str("\n");
+                }
+                return;
+            }
             if (Storage_ErasePage(page_off) != STORAGE_OK) return;
             g_pages_erased[page_idx >> 3] |= mask;
             if (Storage_Write(store_offset, buf, VFS_SECTOR_SIZE) != STORAGE_OK) {
+                Log_Str("VFS write fail2 "); Log_Dec(store_offset); Log_Str("\n");
                 return;
             }
         }
     }
+
+    /* 数据变了: 头部 CRC 需要在下次收尾时重算 */
+    g_header_written = 0;
 
     /* 更新写入字节数 (按簇偏移的最大值) */
     uint32_t new_end = (rel_cluster + 1) * VFS_SECTOR_SIZE;
@@ -912,9 +963,9 @@ void VFS_WriteDone(void)
 {
     if (!g_write_started) return;
 
-    if (g_fw_found && g_fw_size > 0 && !g_header_written) {
+    if (g_fw_found && g_fw_size > 0) {
         vfs_update_header();
-    } else if (!g_header_written && g_write_bytes > 0) {
+    } else if (g_write_bytes > 0) {
         /* Fallback: 根目录信息缺失 (例如只写了数据没写目录项)
          * 缺失的字段用写入字节数和实际最早写入的簇兜底 */
         if (g_fw_size == 0) g_fw_size = g_write_bytes;

@@ -1,0 +1,28 @@
+--cpu Cortex-M3
+".\obj_app_cdc_256k\startup_stm32f10x_md.o"
+".\obj_app_cdc_256k\system_stm32f10x.o"
+".\obj_app_cdc_256k\main.o"
+".\obj_app_cdc_256k\bsp.o"
+".\obj_app_cdc_256k\crc.o"
+".\obj_app_cdc_256k\storage.o"
+".\obj_app_cdc_256k\proto.o"
+".\obj_app_cdc_256k\target_prog.o"
+".\obj_app_cdc_256k\flash_algo.o"
+".\obj_app_cdc_256k\flash_algo_gd32f1x0.o"
+".\obj_app_cdc_256k\flash_algo_gd32f303.o"
+".\obj_app_cdc_256k\flash_algo_apm32f40x.o"
+".\obj_app_cdc_256k\flash_algo_stm32f1.o"
+".\obj_app_cdc_256k\swd_host.o"
+".\obj_app_cdc_256k\usb_hw.o"
+".\obj_app_cdc_256k\usb_cdc.o"
+".\obj_app_cdc_256k\usb_msc.o"
+".\obj_app_cdc_256k\usb_comp.o"
+".\obj_app_cdc_256k\vfs.o"
+".\obj_app_cdc_256k\log.o"
+".\obj_app_cdc_256k\boot_main.o"
+".\obj_app_cdc_256k\boot_flash.o"
+".\obj_app_cdc_256k\boot_proto.o"
+--library_type=microlib --strict --scatter ".\obj_app_cdc_256k\offline_prog_app_cdc_256k.sct"
+--summary_stderr --info summarysizes --map --load_addr_map_info --callgraph --symbols
+--info sizes
+--list ".\list_app_cdc_256k\offline_prog_app_cdc_256k.map" -o .\obj_app_cdc_256k\offline_prog_app_cdc_256k.axf

@@ -36,11 +36,13 @@
 typedef struct {
     volatile uint8_t  state;
     volatile uint8_t  last_result;  /* 0=无 1=成功 2=失败 */
+    volatile uint8_t  host_online;  /* 上位机在线: 3 秒内收到过命令 */
     volatile uint32_t last_error;
     volatile uint32_t target_dpidr;
     volatile uint32_t target_idcode;
     volatile uint32_t progress;     /* 已烧录字节数 */
     volatile uint32_t swd_err;
+    volatile uint32_t burn_seq;     /* 每次烧录尝试 +1 (离线/流式都算), 上位机据此发现新结果 */
 } prog_status_t;
 
 extern prog_status_t g_status;

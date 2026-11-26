@@ -151,6 +151,10 @@ static void cmd_info(void)
     send_hex8(f.crc32);
     send_str(" cap=");
     send_dec(APP_SIZE);
+    /* 应用基址: 64KB/128KB 布局是 0x08001800, 大容量布局是 0x08001C00,
+       上位机据此判断烧录地址, 避免把应用写到旧位置 */
+    send_str(" base=0x");
+    send_hex8(APP_BASE);
     send_str("\n");
 }
 

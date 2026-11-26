@@ -108,6 +108,7 @@ static void do_program(void)
 #if USB_HAS_CDC
     (void)Proto_TakeProgRequest();          /* 清掉烧录期间可能积下的手动触发 */
 #endif
+    g_status.burn_seq++;                    /* 烧录尝试序号: 上位机据此发现新结果 */
     s_state = ST_PROGRAMMING;
     g_status.state = ST_PROGRAMMING;
     g_status.progress = 0;
@@ -125,6 +126,11 @@ static void do_program(void)
         s_state = ST_DONE_WAIT;
         s_attached = 1;                     /* 等拔出后再待命 */
         Log_Str("PROG OK\n");
+        /* 成功烧录流水: 记录区里标记一次, 满页自动进位到页B计数 */
+        (void)Storage_RecordBurn();
+        Log_Str("BURN cnt=");
+        Log_Dec(Storage_RecordCount());
+        Log_Str("\n");
     } else {
         g_status.last_result = 2;
         s_state = ST_FAIL_WAIT;
@@ -187,6 +193,8 @@ int main(void)
     g_status.target_idcode = 0;
     g_status.progress = 0;
     g_status.swd_err = 0;
+    g_status.burn_seq = 0;
+    g_status.host_online = 0;
 
     s_state = Storage_ImageValid() ? ST_ARMED : ST_NO_IMAGE;
     g_status.state = s_state;

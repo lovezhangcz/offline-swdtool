@@ -19,16 +19,16 @@
   *       PB4  : SWDIO  (与 JTAG NJTRST 复用, 需关 JTAG)
   *       PA15 : USB D+ 1.5k 上拉控制 (与 JTAG JTDI 复用, 需关 JTAG)
   *
-  *   Flash 布局 (C8T6 = 64KB, 1KB/页):
-  *     0x08000000 - 0x080017FF : boot (6KB, 独立 target, 只烧一次)
-  *     0x08001800 - 0x080067FF : 应用 (20KB, 可经 USB 由 boot 升级)
-  *     0x08006800 - 0x0800FBFF : 目标固件镜像存储区 (37KB)
-  *     0x0800FC00 - 0x0800FFFF : boot 升级标志页 (boot 维护, 应用不碰)
+  *   Flash 布局 (单 boot, 所有容量统一; 只有镜像区大小按容量区分):
+  *     0x08000000 - 0x080017FF : boot 6KB (独立 target, 只烧一次)
+  *     0x08001800 - 0x08001FFF : 升级标志区 2KB (只用前 1KB, 兼容 2KB 页)
+  *     0x08002000 - 0x08006FFF : 应用 20KB (可经 USB 由 boot 升级)
+  *     0x08007000 - 0x080077FF : 烧录流水记录区 2KB (页A流水 / 页B计数)
+  *     0x08007800 - 0x0800FFFF : 镜像区 34KB  (64KB 芯片),
+  *                               0x0801FFFF / 0x08022FFF 分别 98KB / 110KB
   *
-  *   老 target (offline_prog_CDC / MSC) 不带 BUILD_APP 宏, 仍保持
-  *   0x08000000 起 32KB 程序 + 0x08008000 起 32KB 镜像区, 作为回退。
-  *   若芯片实际为 128KB (很多 C8T6 实为 CBT6 同硅片), 可打开
-  *   FLASH_128K 宏扩大镜像区, 但不能再保证 64KB 版芯片兼容。
+  *   boot / 标志区 / 应用的地址对所有容量完全一致, 两种板共用同一个 boot;
+  *   容量差异只体现在应用 target 的镜像区大小 (FLASH_256K / FLASH_128K 宏)。
   ******************************************************************************
   */
 #ifndef __BOARD_H
@@ -208,9 +208,30 @@
 #define BOOT_BASE           0x08000000u
 #define BOOT_SIZE           (6u * 1024u)
 
-#define APP_BASE            0x08001800u
+/* 单 boot 统一布局: boot / 标志区 / 应用 三段的地址与大小对所有容量都相同,
+   只有镜像区大小按芯片容量区分, 因此一个 boot 二进制同时兼容 64KB 和 256KB 板:
+     0x08000000-0x080017FF  boot 6KB
+     0x08001800-0x08001FFF  升级标志区 2KB (实际只用前 1KB; 留 2KB 是为了
+                             万一芯片是 2KB 页, 擦标志页不会连带擦掉应用)
+     0x08002000-0x08006FFF  应用 20KB
+     0x08007000-0x080077FF  烧录流水记录区 2KB (随离线固件更新而擦除)
+     0x08007800-........    镜像区 (按容量到芯片可用末尾) */
+#define APP_BASE            0x08002000u
 #define APP_SIZE            (20u * 1024u)
 
+#define BOOT_FLAG_ADDR      0x08001800u
+#define BOOT_FLAG_RESERVE   (2u * 1024u)      /* 标志区预留: 0x08001800-0x08001FFF */
+
+#define RECORD_BASE         0x08007000u       /* 烧录流水记录区 2KB (页A流水 + 页B计数) */
+#define RECORD_SIZE         (2u * 1024u)
+#define IMG_STORE_ADDR      (RECORD_BASE + RECORD_SIZE)   /* 0x08007800 */
+#if defined(FLASH_256K)
+  #define IMG_STORE_SIZE    (110u * 1024u)          /* 0x08007800 - 0x08022FFF */
+#elif defined(FLASH_128K)
+  #define IMG_STORE_SIZE    (98u * 1024u)           /* 0x08007800 - 0x0801FFFF */
+#else
+  #define IMG_STORE_SIZE    (34u * 1024u)           /* 0x08007800 - 0x0800FFFF */
+#endif
 /* 备份寄存器分配 (复位/看门狗复位保持; 需备份域写使能 PWR_CR_DBP) */
 #define BKP_REG_FORCE       BKP->DR1        /* 应用写 BOOT_FORCE_MAGIC 后软复位 -> boot 直接进升级模式 */
 #define BKP_REG_BOOTTRY     BKP->DR2        /* boot 连续跳转失败计数, 应用启动成功后清零 */
@@ -219,19 +240,7 @@
 /* 连续 N 次复位都没等到应用确认启动 -> 常驻 boot, 避免坏应用把设备锁死 */
 #define BOOT_TRY_MAX        3u
 
-/* 升级标志页: 放 flash 最后一页 (boot 占 6KB 后其尾部已无空页可用;
- * 该页不属于镜像区, 应用擦除镜像时不会碰到它) */
-/* 镜像存储区紧接 APP 区之后, 到标志页之前; 最后 1KB 归 boot 存升级标志 */
-#define IMG_STORE_ADDR      (APP_BASE + APP_SIZE)   /* 0x08006800 */
-#if defined(FLASH_128K)
-  #define BOOT_FLAG_ADDR    0x0801FC00u
-  #define IMG_STORE_SIZE    (101u * 1024u)          /* 0x08006800 - 0x0801FBFF */
-#else
-  #define BOOT_FLAG_ADDR    0x0800FC00u
-  #define IMG_STORE_SIZE    (37u * 1024u)           /* 0x08006800 - 0x0800FBFF */
-#endif
-
-/* 升级标志页内容 */
+/* 升级标志区内容 */
 #define BOOT_FLAG_MAGIC     0x424F4F54u     /* "BOOT" */
 #define BOOT_FLAG_VALID     0xA55A5AA5u
 

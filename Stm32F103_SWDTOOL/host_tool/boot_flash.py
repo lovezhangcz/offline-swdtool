@@ -13,8 +13,9 @@ USB 调试闭环工具: 通过 boot 升级应用 + 抓诊断日志
     python boot_flash.py run                   # 让 boot 启动应用
     python boot_flash.py log                   # 拉取应用诊断日志
     python boot_flash.py probe [秒数]         # SWD 握手: 读目标 DPIDR/IDCODE; 给秒数则连续重试
-    python boot_flash.py tgt   <bin|hex>      # 上传镜像并用 SWD 烧进目标芯片, 完成后复位运行
-    python boot_flash.py strm  <bin|hex>      # 流式烧录: 分包直达目标 Flash, 不受本机 36KB 镜像区限制
+    python boot_flash.py tgt   <bin|hex|aesbin>  # 上传镜像并用 SWD 烧进目标芯片, 完成后复位运行
+    python boot_flash.py strm  <bin|hex|aesbin>  # 流式烧录: 分包直达目标 Flash, 不受本机镜像区大小限制
+    python boot_flash.py makeaes <bin|hex> [芯片代码] [输出.aesbin]  # 制作 AES 加密专用烧录文件
     python boot_flash.py erase                # 整片擦除目标芯片, 并校验首末字为空白
     python boot_flash.py fsize                # 本机 Flash 实际容量自检 (64KB/128KB 之上实测)
     python boot_flash.py clear                # 删除烧录器内的目标固件 (之后不再自动烧录)
@@ -24,6 +25,9 @@ USB 调试闭环工具: 通过 boot 升级应用 + 抓诊断日志
 target:
     app_cdc : 单功能虚拟串口 (0483:5740)
     app_msc : 复合设备, 同时出 U 盘 + 调试串口 (0483:5742), 两路都能用
+    app_cdc_256k : 同上 CDC, 给大容量主板用 (应用 0x08002000, 镜像区 112KB)
+    app_msc_256k : 同上复合设备, 给大容量主板用 (应用 0x08002000, 镜像区 112KB)
+    boot : 唯一的 boot (boot 6KB + 标志区 2KB + 应用 20KB), 两种容量通用
 
 协议:
     boot  : ASCII 行命令 INFO / ERASE len / W addr len crc16 + 裸数据 / F len crc32 / RUN
@@ -43,17 +47,19 @@ try:
 except ImportError:
     sys.exit("缺少 pyserial, 请先执行: pip install pyserial")
 
+import aesbin
+
 # ------------------------------------------------------------------ 常量 ----
 VID = 0x0483
 PID_CDC = 0x5740        # 单功能 CDC (boot 也是这个)
 PID_MSC = 0x5741        # 单功能 MSC (无串口, 不会出现在 COM 列表)
 PID_COMP = 0x5742       # 复合设备 MSC+CDC (APP_MSC 调试版)
 SERIAL_PIDS = (PID_CDC, PID_COMP)
-APP_BASE = 0x08001800
-APP_SIZE = 20 * 1024        # APP 区 0x08001800~0x080067FF
+APP_BASE = 0x08002000
+APP_SIZE = 20 * 1024        # APP 区 20KB (所有容量统一: boot 6KB + 标志区 2KB 之后)
+APP_BASES = (APP_BASE,)
 CHUNK = 512
 BOOT_WAIT = 12.0
-MSC_MAX_PAYLOAD = 71 * 512          # 镜像区 37K: 72 个数据簇, 最后 1 簇固定给 README.TXT
 
 HDR = b"\xAA\x55"
 CMD_PING = 0x01
@@ -99,6 +105,11 @@ FROMELF = r"C:\Keil_v5\ARM\ARMCC\bin\fromelf.exe"
 TARGETS = {
     "app_cdc": ("offline_prog_APP_CDC", "obj_app_cdc", "offline_prog_app_cdc"),
     "app_msc": ("offline_prog_APP_MSC", "obj_app_msc", "offline_prog_app_msc"),
+    # 256KB 大容量主板: 镜像区 192KB (0x08010000-0x0803FFFF), boot 与 64KB 版共用
+    "app_cdc_256k": ("offline_prog_APP_CDC_256K", "obj_app_cdc_256k",
+                     "offline_prog_app_cdc_256k"),
+    "app_msc_256k": ("offline_prog_APP_MSC_256K", "obj_app_msc_256k",
+                     "offline_prog_app_msc_256k"),
     "boot": ("offline_prog_BOOT", "obj_boot", "offline_prog_boot"),
 }
 
@@ -223,10 +234,14 @@ class AppLink:
             raise RuntimeError("GET_INFO 失败 status=%d len=%d" % (st, len(pl)))
         length, crc, load, cap = struct.unpack("<IIII", pl[1:17])
         fkb = struct.unpack("<I", pl[19:23])[0] if len(pl) >= 23 else 0
+        burn = struct.unpack("<I", pl[23:27])[0] if len(pl) >= 27 else 0
+        chip = struct.unpack("<I", pl[27:31])[0] if len(pl) >= 32 else 0xFFFFFFFF
+        trailer = pl[31] if len(pl) >= 32 else 0
         if not pl[0]:                 # 无镜像时头区是空白, 字段无意义
             length = crc = load = 0
         return dict(valid=pl[0], length=length, crc32=crc, load=load,
-                    capacity=cap, state=pl[17], result=pl[18], flash_kb=fkb)
+                    capacity=cap, state=pl[17], result=pl[18], flash_kb=fkb,
+                    burn_count=burn, chip_code=chip, trailer=trailer)
 
     def reboot_to_boot(self):
         try:
@@ -243,9 +258,10 @@ class AppLink:
         return dict(status=pl[0], dpidr=dpidr, idcode=idcode)
 
     # ---------------- 目标芯片烧录 (镜像上传 + 触发) ----------------
-    def img_begin(self, length, crc, load=TGT_LOAD_ADDR, name=b""):
-        """name: 可选文件名, 设备存入镜像头, 使 U 盘里显示同样的名字"""
-        pl = struct.pack("<III", length, crc, load)
+    def img_begin(self, length, crc, load=TGT_LOAD_ADDR, name=b"", trailer_len=0):
+        """name: 可选文件名, 设备存入镜像头, 使 U 盘里显示同样的名字
+        trailer_len: 载荷尾部随文件携带的信息长度 (不烧进目标)"""
+        pl = struct.pack("<IIII", length, crc, load, trailer_len)
         if name:
             pl += name[:63]
         st, _ = self.cmd(CMD_IMG_BEGIN, pl, timeout=6.0)
@@ -271,13 +287,19 @@ class AppLink:
             raise RuntimeError("PROG_NOW 失败 status=%d" % st)
 
     def status(self, timeout=3.0):
-        """state, result, err, dpidr, idcode, progress, swd_err"""
+        """state, result, err, dpidr, idcode, progress, swd_err
+        [+ burn_seq, host_online: 新固件扩展字段]"""
         st, pl = self.cmd(CMD_GET_STATUS, timeout=timeout)
         if st != 0 or len(pl) < 22:
             raise RuntimeError("GET_STATUS 失败 status=%d len=%d" % (st, len(pl)))
         err, dpidr, idcode, prog, swd_err = struct.unpack("<IIIII", pl[2:22])
-        return dict(state=pl[0], result=pl[1], err=err, dpidr=dpidr,
-                    idcode=idcode, progress=prog, swd_err=swd_err)
+        r = dict(state=pl[0], result=pl[1], err=err, dpidr=dpidr,
+                 idcode=idcode, progress=prog, swd_err=swd_err,
+                 burn_seq=None, host_online=None)
+        if len(pl) >= 27:
+            r["burn_seq"] = struct.unpack("<I", pl[22:26])[0]
+            r["host_online"] = pl[26]
+        return r
 
     # ---------------- 流式烧录 (不占本机镜像区, 支持超大固件) ----------------
     def strm_begin(self, length, crc, load=TGT_LOAD_ADDR):
@@ -334,11 +356,24 @@ class AppLink:
         return bytes(out)
 
     def flash_test(self, timeout=10.0):
-        """本机 Flash 实际容量自检: 芯片自报 KB + 64KB/128KB 之上页的擦写结果"""
+        """本机 Flash 实际容量自检: 芯片自报 KB + 64/128/256KB 之上页的擦写结果"""
         st, pl = self.cmd(CMD_FLASH_TEST, timeout=timeout)
         if st != 0 or len(pl) < 3:
             raise RuntimeError("FLASH_TEST 失败 status=%d" % st)
-        return dict(reported=pl[0], at64=pl[1], at128=pl[2])
+        r = dict(reported=pl[0], at64=pl[1], at128=pl[2], at256=4,
+                 idcode=0, fmc_pid=0, page_size=0)
+        if len(pl) >= 4:
+            r["at256"] = pl[3]
+        if len(pl) >= 12:
+            r["idcode"] = struct.unpack("<I", pl[4:8])[0]
+            r["fmc_pid"] = struct.unpack("<I", pl[8:12])[0]
+        if len(pl) >= 13:
+            r["page_size"] = pl[12]
+        if len(pl) >= 17:
+            r["scan_bad"] = struct.unpack("<I", pl[13:17])[0]
+        if len(pl) >= 21:
+            r["wrp"] = struct.unpack("<I", pl[17:21])[0]
+        return r
 
 
 # ------------------------------------------------------------------ boot 侧 --
@@ -524,10 +559,9 @@ def msc_write(drv, data):
 
 def do_msc(bin_path):
     load_addr, data = load_image(bin_path)
-    # U 盘的可用空间 = IMG_STORE_SIZE(16K) - FAT/目录/README 占用的扇区
-    if len(data) == 0 or len(data) > MSC_MAX_PAYLOAD:
-        raise RuntimeError("镜像 %d 字节超出 U 盘可写上限 %d 字节, 请改用流式烧录 (strm)"
-                           % (len(data), MSC_MAX_PAYLOAD))
+    # 可用空间由虚拟盘自身决定 (64KB 版约 36KB, 256KB 版约 191KB), msc_write 会查
+    if len(data) == 0:
+        raise RuntimeError("固件为空: %s" % bin_path)
     if (load_addr & 0xFF000000) != 0x08000000:
         raise RuntimeError("固件起始地址 0x%08X 不在 0x08xxxxxx" % load_addr)
 
@@ -570,9 +604,12 @@ def do_msc(bin_path):
 
 # ------------------------------------------------------------------ 升级 ----
 def load_app_image(path):
-    """读取主板 APP 固件 (bin/hex) 并校验向量表, 返回 bin 数据"""
+    """读取主板 APP 固件 (bin/hex), 校验向量表; 返回 (数据, 应用基址)
+
+    应用基址取复位向量所在的 1KB 页: 两版布局分别是 0x08001800 / 0x08001C00,
+    这样同一套上位机可以给两种布局烧录, 不用关心 boot 版本。"""
     addr, data = load_image(path)
-    if path.lower().endswith((".hex", ".ihx")) and addr != APP_BASE:
+    if path.lower().endswith((".hex", ".ihx")) and addr not in APP_BASES:
         raise RuntimeError("HEX 起始地址 0x%08X 不是主板 APP 基址 0x%08X"
                            % (addr, APP_BASE))
     if len(data) < 8 or len(data) > APP_SIZE:
@@ -580,18 +617,41 @@ def load_app_image(path):
     sp, rv = struct.unpack("<II", data[:8])
     if not (0x20000000 <= sp < 0x20010000):
         raise RuntimeError("不是主板 APP 固件: 向量表 SP=0x%08X" % sp)
-    if not (APP_BASE <= (rv & ~1) < APP_BASE + APP_SIZE):
-        raise RuntimeError("不是主板 APP 固件: 复位向量 0x%08X 不在 0x%08X~0x%08X"
-                           " (是不是选成了目标芯片固件?)"
-                           % (rv, APP_BASE, APP_BASE + APP_SIZE))
-    return data
+    base = (rv & ~1) & ~0x3FF
+    if base not in APP_BASES:
+        raise RuntimeError("不是主板 APP 固件: 复位向量 0x%08X 不在 0x%08X 起的"
+                           " APP 区 (是不是选成了目标芯片固件?)"
+                           % (rv, APP_BASE))
+    return data, base
+
+
+def info_field(info, key, default=None):
+    """从 boot 的 "INFO ver=.. app=.. base=0x.." 行里取一个字段"""
+    for tok in info.split():
+        if tok.startswith(key + "="):
+            v = tok[len(key) + 1:]
+            try:
+                return int(v, 0)
+            except ValueError:
+                try:
+                    return int(v, 16)      # boot 打印的 base=08002000 不带 0x
+                except ValueError:
+                    return v
+    return default
 
 
 def do_flash(dev, bin_path):
     """升级主板应用: bin/hex 均可, 镜像必须位于 APP 区"""
-    data = load_app_image(bin_path)
+    data, app_base = load_app_image(bin_path)
     bl, info = enter_boot(dev, force=True)
     print("[boot]", info)
+    boot_base = info_field(info, "base")
+    if boot_base is None:
+        raise RuntimeError("当前 boot 未上报应用基址 (旧版 boot, 应用在 0x08001800); "
+                           "请先用 ST-Link 烧入新的 out\\boot.bin")
+    if app_base != boot_base:
+        raise RuntimeError("镜像按 0x%08X 链接, 但当前 boot 的应用基址是 0x%08X, 布局不一致"
+                           % (app_base, boot_base))
     print("[boot] 擦除 %d 字节 ..." % len(data))
     r = bl.cmd("ERASE %d" % len(data), timeout=15.0)
     if r != "OK":
@@ -600,7 +660,7 @@ def do_flash(dev, bin_path):
     t0 = time.time()
     for off in range(0, len(data), CHUNK):
         chunk = data[off:off + CHUNK]
-        bl.write_chunk(APP_BASE + off, chunk)
+        bl.write_chunk(app_base + off, chunk)
         if (off // CHUNK) % 8 == 0:
             sys.stdout.write("\r[boot] 写入 %d/%d" % (min(off + CHUNK, len(data)), len(data)))
             sys.stdout.flush()
@@ -695,39 +755,66 @@ def load_image(path):
     return TGT_LOAD_ADDR, open(path, "rb").read()
 
 
+def load_image_ex(path):
+    """读取固件: .aesbin 在内存里解密还原, 其它按 bin/hex。
+    返回 (加载地址, 镜像数据, 附加信息 dict)
+    附加信息: fmt / chip_code(None=未携带) / trailer(随镜像携带的尾部字节)"""
+    if aesbin.is_aesbin(path):
+        r = aesbin.load_file(path)
+        return (r["load_addr"], r["image"],
+                dict(fmt="aesbin", chip_code=r["chip_code"],
+                     trailer=r["trailer"], reserved=r["reserved"]))
+    load, data = load_image(path)
+    fmt = "hex" if path.lower().endswith((".hex", ".ihx")) else "bin"
+    return load, data, dict(fmt=fmt, chip_code=None, trailer=b"", reserved=b"")
+
+
 def do_tgt(dev, bin_path):
-    """把固件 (bin/hex) 上传到本机镜像区, 再经 SWD 烧进目标并复位运行"""
-    load_addr, data = load_image(bin_path)
+    """把固件 (bin/hex/aesbin) 上传到本机镜像区, 再经 SWD 烧进目标并复位运行
+    aesbin 会在内存里解密; 文件尾部携带的芯片代码等信息一起存入烧录器,
+    但 SWD 烧录时只写镜像部分, 不会烧到目标芯片"""
+    load_addr, data, meta = load_image_ex(bin_path)
+    trailer = meta["trailer"]
+    payload = data + trailer
     if len(data) == 0:
         raise RuntimeError("固件为空: %s" % bin_path)
     if (load_addr & 0xFF000000) != 0x08000000:
         raise RuntimeError("固件起始地址 0x%08X 不在 0x08xxxxxx" % load_addr)
-    if len(data) > 36 * 1024:
-        raise RuntimeError("固件 %d 字节超出镜像区可用空间 (~36KB, 更大请用流式烧录)" % len(data))
-
     crc = zlib.crc32(data) & 0xFFFFFFFF
-    print("[tgt] %s: %d 字节 CRC32=%08X -> 0x%08X"
-          % (os.path.basename(bin_path), len(data), crc, load_addr))
 
     app = try_app(dev, 1.5)
     if app is None:
         print("设备不在应用模式, 先执行: python boot_flash.py run")
         return 3
 
+    # 镜像区大小随固件版本不同 (64KB 版约 36KB, 256K 版 110KB), 以设备自报为准
+    cap = app.info().get("capacity", 0)
+    if cap and len(payload) > cap:
+        raise RuntimeError("固件 %d 字节(含尾部 %d 字节)超出本机镜像区可用空间 "
+                           "(%d 字节), 更大请用流式烧录 (strm)"
+                           % (len(payload), len(trailer), cap))
+
+    tag = ""
+    if meta["chip_code"] is not None:
+        tag = "  芯片代码=%s" % aesbin.chip_name(meta["chip_code"])
+    print("[tgt] %s: %d 字节 CRC32=%08X -> 0x%08X%s"
+          % (os.path.basename(bin_path), len(data), crc, load_addr, tag))
+
     t0 = time.time()
     # 文件名改为 .bin, 与 U 盘写入方式一致 (U 盘里看到的就是原始文件名)
     fw_name = os.path.splitext(os.path.basename(bin_path))[0] + ".bin"
     fw_name = fw_name.encode("ascii", "replace").replace(b"?", b"_")
-    app.img_begin(len(data), crc, load_addr, fw_name)
+    app.img_begin(len(payload), crc, load_addr, fw_name, len(trailer))
 
     off = 0
-    while off < len(data):
-        chunk = data[off:off + TGT_CHUNK]
+    while off < len(payload):
+        chunk = payload[off:off + TGT_CHUNK]
         got = app.img_data(off, chunk)
         off += len(chunk)
         if got != off:
             raise RuntimeError("设备已接收 %d != 期望 %d" % (got, off))
-    print("\r[tgt] 镜像上传完成 %d/%d 字节 (%.1fs)" % (off, len(data), time.time() - t0))
+    print("\r[tgt] 镜像上传完成 %d/%d 字节 (%.1fs)"
+          % (len(data), len(data), time.time() - t0))
 
     app.img_end()
     print("[tgt] 镜像生效 (CRC32 已由设备校验)")
@@ -838,13 +925,29 @@ def do_fsize(dev):
         return 3
     r = app.flash_test()
     names = {0: "OK", 1: "解锁/擦除失败", 2: "编程失败", 3: "回读不一致", 4: "该页不存在"}
+    print("[fsize] 芯片 IDCODE=0x%08X (DEV=0x%03X REV=0x%04X) FMC_PID=0x%08X"
+          % (r["idcode"], r["idcode"] & 0xFFF, (r["idcode"] >> 16) & 0xFFFF,
+             r["fmc_pid"]))
     print("[fsize] 芯片自报 F_SIZE: %d KB" % r["reported"])
     print("[fsize] 0x08010000 (64KB 之上) 擦写: %s" % names.get(r["at64"], r["at64"]))
     print("[fsize] 0x08020000 (128KB 之上) 擦写: %s" % names.get(r["at128"], r["at128"]))
-    if r["at64"] == 0 and r["at128"] == 0:
-        print("[fsize] 结论: 实际可用 Flash >= 256KB")
+    print("[fsize] 0x08040000 (256KB 之上) 擦写: %s" % names.get(r["at256"], r["at256"]))
+    psz = {0: "1KB", 1: "2KB"}.get(r["page_size"], "探测失败(%d)" % r["page_size"])
+    print("[fsize] 物理页大小: %s" % psz)
+    if "scan_bad" in r:
+        if r["scan_bad"] == 0xFFFFFFFF:
+            print("[fsize] 0x08010000-0x0803FFFF 逐页擦除: 全部正常")
+        else:
+            print("[fsize] 0x08010000-0x0803FFFF 逐页擦除: 0x%08X 起失败" % r["scan_bad"])
+    if "wrp" in r:
+        print("[fsize] FLASH_WRPR=0x%08X%s" % (r["wrp"], "" if r["wrp"] == 0xFFFFFFFF
+                                              else "  <- 存在写保护"))
+    if r["at256"] == 0:
+        print("[fsize] 结论: 实际可用 Flash >= 512KB")
+    elif r["at128"] == 0:
+        print("[fsize] 结论: 实际可用 Flash = 256KB (自报 %dKB 不可信)" % r["reported"])
     elif r["at64"] == 0:
-        print("[fsize] 结论: 实际可用 Flash >= 128KB (自报 %dKB 不可信)" % r["reported"])
+        print("[fsize] 结论: 实际可用 Flash = 128KB (自报 %dKB 不可信)" % r["reported"])
     else:
         print("[fsize] 结论: 实际可用 Flash = 64KB")
     app.close()
@@ -852,15 +955,19 @@ def do_fsize(dev):
 
 
 def do_strm(dev, bin_path):
-    """流式烧录 (bin/hex): 数据分包直达目标 Flash, 不占本机 16KB 镜像区"""
-    load_addr, data = load_image(bin_path)
+    """流式烧录 (bin/hex/aesbin): 数据分包直达目标 Flash, 不占本机镜像区
+    aesbin 先解密, 只把镜像部分写进目标, 尾部携带的信息不烧录"""
+    load_addr, data, meta = load_image_ex(bin_path)
     if len(data) == 0:
         raise RuntimeError("固件为空: %s" % bin_path)
     if (load_addr & 0xFF000000) != 0x08000000:
         raise RuntimeError("固件起始地址 0x%08X 不在 0x08xxxxxx" % load_addr)
     crc = zlib.crc32(data) & 0xFFFFFFFF
-    print("[strm] %s: %d 字节 CRC32=%08X -> 0x%08X"
-          % (os.path.basename(bin_path), len(data), crc, load_addr))
+    tag = ""
+    if meta["chip_code"] is not None:
+        tag = "  芯片代码=%s" % aesbin.chip_name(meta["chip_code"])
+    print("[strm] %s: %d 字节 CRC32=%08X -> 0x%08X%s"
+          % (os.path.basename(bin_path), len(data), crc, load_addr, tag))
 
     app = try_app(dev, 1.5)
     if app is None:
@@ -986,6 +1093,20 @@ def main():
         do_msc(args[1])
         return 0
 
+    if cmd == "makeaes":
+        # 纯本地操作, 不需要连接烧录器
+        if len(args) < 2:
+            print("用法: python boot_flash.py makeaes <bin|hex> [芯片代码] [输出.aesbin]")
+            return 1
+        src = args[1]
+        code = int(args[2], 0) if len(args) > 2 else 0
+        out = args[3] if len(args) > 3 else os.path.splitext(src)[0] + ".aesbin"
+        load, data = load_image(src)
+        r = aesbin.make_file(out, data, code, load)
+        print("[aesbin] %s: 镜像 %d 字节, 芯片 %s, 文件 %d 字节"
+              % (out, len(data), aesbin.chip_name(code), r["size"]))
+        return 0
+
     dev = find_port()
     if dev is None:
         return 2
@@ -1008,10 +1129,14 @@ def main():
             print("[app]", dev, "版本:", app.version())
             try:
                 m = app.info()
+                extra = ""
+                if m["chip_code"] != 0xFFFFFFFF:
+                    extra = " 芯片代码=%s" % aesbin.chip_name(m["chip_code"])
                 print("[app] 镜像: valid=%d len=%d crc=%08X load=0x%08X cap=%d "
-                      "state=%d result=%d 本机Flash自报=%dKB"
+                      "state=%d result=%d 本机Flash自报=%dKB 成功烧录=%d次%s"
                       % (m["valid"], m["length"], m["crc32"], m["load"],
-                         m["capacity"], m["state"], m["result"], m["flash_kb"]))
+                         m["capacity"], m["state"], m["result"], m["flash_kb"],
+                         m["burn_count"], extra))
             except Exception as e:
                 print("[app] 镜像信息读取失败:", e)
             logs = app.logs()
