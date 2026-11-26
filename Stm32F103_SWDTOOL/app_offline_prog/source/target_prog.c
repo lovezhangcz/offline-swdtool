@@ -28,6 +28,10 @@
 #define DBG_CR       0xE0042004u
 #define DBG_IWDG_STOP  0x00000100u
 #define DBG_WWDG_STOP  0x00000200u
+/* ---- STM32F4/APM32F4 DBGMCU (冻结位在 APB1_FZ) ---- */
+#define DBG_APB1_FZ      0xE0042008u
+#define FZ_IWDG_STOP     (1u << 8)
+#define FZ_WWDG_STOP     (1u << 9)
 /* ---- GD32 FMC 产品 ID ---- */
 #define FMC_PID        0x40022100u
 
@@ -60,6 +64,22 @@ static uint8_t target_id_check(uint32_t idcode)
     if (dev == 0x414u && is_m4) {                 /* GD32F303 */
         s_active_algo = &FLASH_ALGO_GD32F303;
         name = "GD32F303";
+    } else if (dev == 0x012u && is_m4) {          /* 极海 APM32 M4 芯片
+                                                     (实测 IDCODE=0x001DA012) */
+        /* 实测该芯片是 F1 风格外设映射, 不是 STM32F4 风格:
+             RCC    @0x40021000 (F4 应 @0x40023800, 实测读 0)
+             FMC    @0x40022000 (F4 应 @0x40023C00, 实测读 0)
+             GPIOC  @0x40011000 (CRL 复位值 0x44444444)
+             DBGMCU_CR @0xE0042004 有效 (F1 风格冻结位)
+             0x1FFF0000 (F4 系统存储区) 访问总线错误
+           => 用 F1 算法 (FMC@0x40022000, 1KB 页迭代对 1KB/2KB 物理页都安全) */
+        s_active_algo = &FLASH_ALGO_STM32F1;
+        name = "APM32-M4(F1FMC)";
+    } else if ((dev == 0x413u || dev == 0x419u) && is_m4) {
+        /* 真 STM32F405/407/415/417 (0x413) 与 F42x/43x (0x419):
+           FMC 与 APM32F40X 寄存器兼容, 共用同一算法 */
+        s_active_algo = &FLASH_ALGO_APM32F40X;
+        name = "STM32F4";
     } else if (dev == 0x414u) {                   /* STM32F103 大容量 / GD32F103 HD */
         s_active_algo = &FLASH_ALGO_STM32F1;
         name = "STM32F1-HD";
@@ -118,6 +138,19 @@ static uint8_t target_id_check(uint32_t idcode)
         return TP_OK;
     return TP_ERR_IDCODE;
 #endif
+}
+
+/* 冻结目标看门狗: F1/GD32 写 DBGMCU_CR; F4/APM32F4 写 DBGMCU_APB1_FZ */
+static void freeze_wdog(const flash_algo_t *algo)
+{
+    uint32_t v;
+    if (algo == &FLASH_ALGO_APM32F40X) {
+        if (SWD_Mem_Read32(DBG_APB1_FZ, &v) == SWD_OK)
+            (void)SWD_Mem_Write32(DBG_APB1_FZ, v | FZ_IWDG_STOP | FZ_WWDG_STOP);
+    } else {
+        if (SWD_Mem_Read32(DBG_CR, &v) == SWD_OK)
+            (void)SWD_Mem_Write32(DBG_CR, v | DBG_IWDG_STOP | DBG_WWDG_STOP);
+    }
 }
 
 /* 连接 + 读 IDCODE + 身份校验
@@ -305,7 +338,6 @@ static uint8_t tp_run_impl(uint32_t *err_addr)
 {
     const img_hdr_t *h = Storage_Header();
     uint32_t addr, len, load;
-    uint32_t v;
     uint8_t  r;
     uint32_t crc;
 
@@ -338,8 +370,7 @@ static uint8_t tp_run_impl(uint32_t *err_addr)
     if (r != TP_OK) { SWD_GPIO_Release(); return r; }
 
     /* 冻结看门狗, 停机 */
-    if (SWD_Mem_Read32(DBG_CR, &v) == SWD_OK)
-        (void)SWD_Mem_Write32(DBG_CR, v | DBG_IWDG_STOP | DBG_WWDG_STOP);
+    freeze_wdog(ACTIVE_ALGO);
     if (SWD_Mem_Write32(DHCSR, 0xA05F0003u) != SWD_OK) return TP_ERR_HALT;
     SWD_ReleaseNRST();      /* 停机已生效, 释放复位 (固件不会跑起来) */
 
@@ -349,6 +380,9 @@ static uint8_t tp_run_impl(uint32_t *err_addr)
 
         if (FlashAlgo_Load(algo) != FA_OK) return TP_ERR_CONNECT;
 
+        /* Keil 算法约定: Init 的第 3 个参数 fnc 声明接下来的操作
+           (1=Erase 2=Program 3=Verify), 切换阶段必须 UnInit+重新 Init,
+           否则有的算法 (STM32F4/APM32F4) ProgramPage 会静默不干活 */
         r = algo_call(algo, algo->init, load, 0, 1,
                       algo->prog_timeout_ms + 500u, TP_ERR_ALGO);
         if (r != TP_OK) return r;
@@ -368,6 +402,13 @@ static uint8_t tp_run_impl(uint32_t *err_addr)
                               algo->erase_timeout_ms + 500u, TP_ERR_ERASE);
             }
         }
+        (void)algo_call(algo, algo->uninit, 1, 0, 0,
+                        algo->prog_timeout_ms + 500u, TP_OK);
+        if (r != TP_OK) return r;
+
+        /* 切到编程阶段: 重新 Init(fnc=2) */
+        r = algo_call(algo, algo->init, load, 0, 2,
+                      algo->prog_timeout_ms + 500u, TP_ERR_ALGO);
         if (r != TP_OK) return r;
 
         /* ---- 4. 按页编程 ---- */
@@ -418,8 +459,8 @@ static uint8_t tp_run_impl(uint32_t *err_addr)
             }
         }
 
-        /* UnInit (尽力而为) */
-        (void)algo_call(algo, algo->uninit, 3, 0, 0,
+        /* UnInit(fnc=2) 收尾编程阶段 (尽力而为) */
+        (void)algo_call(algo, algo->uninit, 2, 0, 0,
                         algo->prog_timeout_ms + 500u, TP_OK);
     }
     g_status.progress = len;
@@ -553,8 +594,7 @@ uint8_t TargetStream_Begin(uint32_t total_len, uint32_t crc32,
     if (r != TP_OK) { SWD_GPIO_Release(); return r; }
     algo = ACTIVE_ALGO;                 /* AUTO: 识别后取对应算法 */
 
-    if (SWD_Mem_Read32(DBG_CR, &v) == SWD_OK)
-        (void)SWD_Mem_Write32(DBG_CR, v | DBG_IWDG_STOP | DBG_WWDG_STOP);
+    freeze_wdog(algo);
     if (SWD_Mem_Write32(DHCSR, 0xA05F0003u) != SWD_OK)
         return TP_ERR_HALT;
     SWD_ReleaseNRST();
@@ -594,6 +634,13 @@ uint8_t TargetStream_Begin(uint32_t total_len, uint32_t crc32,
                           algo->erase_timeout_ms + 500u, TP_ERR_ERASE);
         }
     }
+    if (r != TP_OK) { strm_reset_run(); return r; }
+
+    /* 切到编程阶段: UnInit(fnc=1) 后重新 Init(fnc=2) */
+    (void)algo_call(algo, algo->uninit, 1, 0, 0,
+                    algo->prog_timeout_ms + 500u, TP_OK);
+    r = algo_call(algo, algo->init, load_addr, 0, 2,
+                  algo->prog_timeout_ms + 500u, TP_ERR_ALGO);
     if (r != TP_OK) { strm_reset_run(); return r; }
 
     /* ---- 就绪 ---- */
@@ -668,7 +715,7 @@ uint8_t TargetStream_End(uint32_t *err_addr)
         }
     }
 
-    (void)algo_call(algo, algo->uninit, 3, 0, 0,
+    (void)algo_call(algo, algo->uninit, 2, 0, 0,
                     algo->prog_timeout_ms + 500u, TP_OK);
 
     /* ---- 回读 CRC32 校验 ---- */
@@ -734,8 +781,7 @@ uint8_t TargetEraseChip(void)
     if (r != TP_OK) { Log_Str("EA attach fail\n"); SWD_GPIO_Release(); return r; }
     algo = ACTIVE_ALGO;                 /* AUTO: 识别后取对应算法 */
 
-    if (SWD_Mem_Read32(DBG_CR, &v) == SWD_OK)
-        (void)SWD_Mem_Write32(DBG_CR, v | DBG_IWDG_STOP | DBG_WWDG_STOP);
+    freeze_wdog(algo);
     if (SWD_Mem_Write32(DHCSR, 0xA05F0003u) != SWD_OK) {
         Log_Str("EA halt fail\n");
         SWD_GPIO_Release();
@@ -772,7 +818,7 @@ uint8_t TargetEraseChip(void)
         r = TP_ERR_ERASE;
     }
 
-    (void)algo_call(algo, algo->uninit, 3, 0, 0,
+    (void)algo_call(algo, algo->uninit, 1, 0, 0,
                     algo->prog_timeout_ms + 500u, TP_OK);
 
     /* 空白校验: 首字与末字都应是 0xFFFFFFFF */

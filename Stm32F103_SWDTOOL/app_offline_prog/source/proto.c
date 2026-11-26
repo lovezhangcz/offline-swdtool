@@ -37,6 +37,8 @@
 #define CMD_STRM_DATA   0x31u
 #define CMD_STRM_END    0x32u
 #define CMD_TGT_ERASE   0x33u
+#define CMD_TGT_READ    0x34u
+#define CMD_TGT_DETECT  0x35u
 
 #define RSP_OK          0x00u
 #define RSP_ERR_ARG     0x01u
@@ -431,6 +433,43 @@ static void cmd_exec(uint8_t cmd, const uint8_t *pl, uint16_t len)
         p[0] = sr;
         memcpy(&p[1], &err, 4);
         proto_respond(cmd, RSP_OK, p, 5);
+        break;
+    }
+
+    case CMD_TGT_READ: {
+        /* 诊断: 直接读目标存储器 <- addr(4) len(4,<=48), 返回原始字节 */
+        uint32_t addr, n, off = 0;
+        uint8_t rb[48];
+        if (g_status.state == 2u) {
+            proto_respond(cmd, RSP_ERR_STATE, 0, 0);
+            break;
+        }
+        if (len != 8u) { proto_respond(cmd, RSP_ERR_ARG, 0, 0); break; }
+        memcpy(&addr, &pl[0], 4);
+        memcpy(&n,    &pl[4], 4);
+        if (n == 0u || n > sizeof(rb) || (addr & 3u) != 0u || (n & 3u) != 0u) {
+            proto_respond(cmd, RSP_ERR_ARG, 0, 0);
+            break;
+        }
+        {
+            uint32_t dp;
+            uint8_t sr = SWD_Connect(&dp);
+            if (sr != SWD_OK) {
+                SWD_GPIO_Release();
+                proto_respond(cmd, RSP_ERR_FLASH, 0, 0);
+                break;
+            }
+            while (off < n) {
+                uint32_t nw = (n - off) / 4u;
+                if (nw > 12u) nw = 12u;
+                if (SWD_Mem_ReadBlock(addr + off, (uint32_t *)(rb + off), nw) != SWD_OK)
+                    break;
+                off += nw * 4u;
+            }
+            SWD_GPIO_Release();
+        }
+        if (off != n) { proto_respond(cmd, RSP_ERR_FLASH, rb, (uint16_t)off); break; }
+        proto_respond(cmd, RSP_OK, rb, (uint16_t)n);
         break;
     }
 
