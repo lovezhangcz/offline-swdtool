@@ -53,6 +53,8 @@ STATUS_S = 0.5                    # 烧录器状态/结果轮询间隔 (同时�
 RECONNECT_S = 1.0                 # 掉线重连间隔
 SETTLE_S = 0.5                    # 重连后等供电稳定再握手
 BURN_WAIT_S = 90.0                # 单次烧录最长等待
+INSERT_SETTLE_S = 0.8             # 目标插入后等待供电稳定再触发 (电机板浪涌)
+AUTO_RETRY_MAX = 2                # 离线自动烧录失败后自动再触发次数
 
 ST_PROG = bf.ST_PROGRAMMING
 ST_DONE = bf.ST_DONE_WAIT

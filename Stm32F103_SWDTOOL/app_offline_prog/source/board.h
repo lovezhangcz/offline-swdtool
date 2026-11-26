@@ -279,7 +279,7 @@ typedef struct {
 #define APP_FW_VERSION_MINOR  1
 #endif
 #ifndef APP_FW_VERSION_PATCH
-#define APP_FW_VERSION_PATCH  11
+#define APP_FW_VERSION_PATCH  15
 #endif
 
 #define APP_STR_(x)         #x

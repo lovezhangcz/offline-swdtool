@@ -44,6 +44,7 @@
 #define ST_PROGRAMMING     2u
 #define ST_DONE_WAIT       3u
 #define ST_FAIL_WAIT       4u
+#define ST_TARGET_SEEN     5u      /* 已识别目标, 稳定电源中 (LED 双闪, 仅本地显示) */
 
 prog_status_t g_status;
 
@@ -57,7 +58,13 @@ const app_fw_info_t g_app_fw_info __attribute__((at(APP_FW_INFO_ADDR))) = {
 
 static uint8_t s_attached;      /* 目标当前是否在线 */
 static uint8_t s_state;
+static uint8_t s_led_state = 0xFFu;   /* 上一次送到 LED 的状态, 0xFF 强制首刷 */
 static uint32_t s_done_crc;     /* 最近一次烧录用到的镜像 CRC32 */
+static uint32_t s_attach_ms;    /* 首次探测到目标的时刻 (0=无目标) */
+
+/* 目标插入后等待供电稳定再自动烧录 (电机板等大电容负载, 插入瞬间电源最差,
+   实测 40ms 就抢烧会死在编程中途; 等 500ms 成功率显著提高) */
+#define ATTACH_SETTLE_MS    500u
 
 /* ---------------- 异常处理: 跑飞后自动回 boot ---------------- */
 /* 应用启动后若发生硬件异常, 唯一的自救通道是 USB 升级, 所以置"进 boot"标记后复位。
@@ -76,36 +83,9 @@ void MemManage_Handler(void)  { fault_to_boot(); }
 void BusFault_Handler(void)   { fault_to_boot(); }
 void UsageFault_Handler(void) { fault_to_boot(); }
 
-/* ---------------- LED 模式 ---------------- */
-static void led_update(void)
-{
-    uint32_t ms = BSP_Millis();
-    switch (s_state) {
-    case ST_NO_IMAGE:                       /* 1Hz, 50% */
-        if ((ms % 1000u) < 500u) LED_ON(); else LED_OFF();
-        break;
-    case ST_ARMED:                          /* 心跳: 0.2s 亮 / 1.8s 灭 */
-        if ((ms % 2000u) < 200u) LED_ON(); else LED_OFF();
-        break;
-    case ST_PROGRAMMING:                    /* 10Hz 快闪 */
-        if ((ms % 100u) < 50u) LED_ON(); else LED_OFF();
-        break;
-    case ST_DONE_WAIT:
-        LED_ON();
-        break;
-    case ST_FAIL_WAIT: {                    /* 三短闪, 1.5s 周期 */
-        uint32_t t = ms % 1500u;
-        if ((t < 100u) || (t >= 200u && t < 300u) || (t >= 400u && t < 500u))
-            LED_ON();
-        else
-            LED_OFF();
-        break;
-    }
-    default:
-        LED_OFF();
-        break;
-    }
-}
+/* LED 模式已移至 bsp.c (SysTick 中断驱动的 LED_SetState),
+ * 即使主循环被 TargetProg_Run 长时间阻塞, 灯也会持续按节奏闪烁。
+ * 状态->灯效 映射见 bsp.h。 */
 
 /* ---------------- 烧录动作 ---------------- */
 static void do_program(void)
@@ -120,6 +100,7 @@ static void do_program(void)
     s_state = ST_PROGRAMMING;
     g_status.state = ST_PROGRAMMING;
     g_status.progress = 0;
+    LED_SetState(ST_PROGRAMMING);           /* 立即切快闪, 提醒操作者勿拔 (主循环将被阻塞) */
 
     r = TargetProg_Run(&err_addr);
 
@@ -133,6 +114,7 @@ static void do_program(void)
         g_status.last_result = 1;
         s_state = ST_DONE_WAIT;
         s_attached = 1;                     /* 等拔出后再待命 */
+        LED_SetState(ST_DONE_WAIT);
         Log_Str("PROG OK\n");
         /* 成功烧录流水: 记录区里标记一次, 满页自动进位到页B计数 */
         (void)Storage_RecordBurn();
@@ -143,6 +125,7 @@ static void do_program(void)
         g_status.last_result = 2;
         s_state = ST_FAIL_WAIT;
         s_attached = 1;
+        LED_SetState(ST_FAIL_WAIT);
         Log_Str("PROG ERR code=");
         Log_Dec(r);
         Log_Str(" addr=0x");
@@ -218,7 +201,21 @@ int main(void)
         Proto_Poll();                       /* 处理上位机命令 */
         USB_CDC_Poll();
 #endif
-        led_update();
+        /* 把"更紧急"的状态送给 LED:
+         *   本地自动流程改 s_state; 主机触发的流式/擦除烧录改 g_status.state
+         *   (proto.c 直接写 2/3/4)。取烧录相关的优先, 这样任何路径开始烧录
+         *   灯都会立刻切到快闪。只在变化时调用, 避免每 40ms 重置闪烁相位。 */
+        {
+            uint8_t led_st = s_state;
+            if (g_status.state == ST_PROGRAMMING ||
+                g_status.state == ST_DONE_WAIT ||
+                g_status.state == ST_FAIL_WAIT)
+                led_st = g_status.state;
+            if (led_st != s_led_state) {
+                s_led_state = led_st;
+                LED_SetState(led_st);
+            }
+        }
 
 #if USB_HAS_CDC && DBG_TOOLS
         /* 示波器时钟测试模式: 持续输出 SWCLK/SWDIO 方波, 暂停目标探测 */
@@ -255,6 +252,15 @@ int main(void)
         }
 #endif
 
+        /* 目标已识别: 等供电稳定再烧录 (大电容负载插入瞬间电源最差,
+         * 实测立即烧会死在编程中途)。这段不参与探测节流, 每轮都检查到点没有;
+         * LED 此时是双闪, 告诉操作者"已看到目标, 别拔"。 */
+        if (s_state == ST_TARGET_SEEN) {
+            if ((BSP_Millis() - s_attach_ms) >= ATTACH_SETTLE_MS)
+                do_program();
+            continue;
+        }
+
         /* 每 DETECT_INTERVAL_MS 探测目标 */
         if ((BSP_Millis() - t_detect) < DETECT_INTERVAL_MS) continue;
         t_detect = BSP_Millis();
@@ -263,7 +269,16 @@ int main(void)
             if (TargetProg_Detect() == TP_OK) {
                 SWD_GPIO_Release();
                 s_attached = 1;
-                do_program();               /* 新目标接入 -> 自动烧录 */
+                s_attach_ms = BSP_Millis();
+                s_state = ST_TARGET_SEEN;   /* 先稳定 500ms 再烧, LED 切双闪 */
+                g_status.state = s_state;   /* 上位机可见: 已识别目标, 稳定电源中 */
+                Log_Str("TGT SEEN DPIDR=0x");
+                Log_Hex(g_status.target_dpidr);
+                Log_Str(" ID=0x");
+                Log_Hex(g_status.target_idcode);
+                Log_Str(" swd=");
+                Log_Dec(g_status.swd_err);
+                Log_Str("\n");
             } else {
                 SWD_GPIO_Release();
             }

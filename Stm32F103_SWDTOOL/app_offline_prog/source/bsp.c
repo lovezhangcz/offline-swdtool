@@ -22,6 +22,66 @@ void BSP_PinConfig(GPIO_TypeDef *port, uint32_t pin, uint32_t cnf_mode)
     *reg = tmp;
 }
 
+/* ============================================================
+ *  LED 状态指示 (在 1ms SysTick 时基里推进)
+ *  设计要点: 闪烁节奏放在中断里, 主循环被 TargetProg_Run 阻塞
+ *  (10~20s) 时灯也不会冻住, 操作者始终能判断烧录器在干什么。
+ *  每个状态对应一段 {亮/灭, 持续ms} 序列, 到末尾循环。
+ * ============================================================ */
+typedef struct { uint8_t on; uint16_t ms; } led_step_t;
+
+static const led_step_t s_pat_no_image[] = { {1,70}, {0,1930} };              /* 空闲: 2s 一短闪 */
+static const led_step_t s_pat_armed[]    = { {1,90}, {0,310}  };              /* 探测中: ~2.5Hz 中闪 */
+static const led_step_t s_pat_prog[]     = { {1,30}, {0,30}   };              /* 烧录中: ~16Hz 快闪 (勿拔) */
+static const led_step_t s_pat_done[]     = { {1,1000} };                       /* 成功: 常亮 */
+static const led_step_t s_pat_fail[]     = { {1,70},{0,70},{1,70},{0,70},
+                                             {1,70},{0,990} };                 /* 失败: 三短闪循环 */
+static const led_step_t s_pat_seen[]     = { {1,70},{0,70},{1,70},{0,590} };  /* 已识别目标: 双闪 */
+
+static const led_step_t *s_led_pat    = 0;
+static uint8_t           s_led_len    = 0;
+static uint8_t           s_led_idx    = 0;
+static uint16_t          s_led_remain = 0;
+
+static void led_apply(const led_step_t *p)
+{
+    if (p->on) LED_ON(); else LED_OFF();
+}
+
+void LED_SetState(uint8_t state)
+{
+    const led_step_t *p = s_pat_no_image;
+    uint8_t n = 2;
+    switch (state) {
+        case 1u: p = s_pat_armed;    n = 2; break;
+        case 2u: p = s_pat_prog;     n = 2; break;
+        case 3u: p = s_pat_done;     n = 1; break;
+        case 4u: p = s_pat_fail;     n = 6; break;
+        case 5u: p = s_pat_seen;     n = 4; break;
+        case 0u:
+        default: p = s_pat_no_image; n = 2; break;
+    }
+    __disable_irq();
+    s_led_pat    = p;
+    s_led_len    = n;
+    s_led_idx    = 0;
+    s_led_remain = p[0].ms;
+    __enable_irq();
+    led_apply(p);
+}
+
+static void LED_Tick(void)   /* 由 SysTick_Handler 每 1ms 调用一次 */
+{
+    const led_step_t *p;
+    if (!s_led_pat || !s_led_len) return;
+    if (s_led_remain == 0u) return;
+    if (--s_led_remain != 0u) return;
+    if (++s_led_idx >= s_led_len) s_led_idx = 0u;   /* 循环; done 仅 1 步 -> 保持常亮 */
+    p = &s_led_pat[s_led_idx];
+    s_led_remain = p->ms;
+    led_apply(p);
+}
+
 void BSP_Init(void)
 {
     RCC->APB2ENR |= RCC_APB2ENR_IOPAEN | RCC_APB2ENR_IOPBEN |
@@ -44,6 +104,7 @@ void BSP_Init(void)
 void SysTick_Handler(void)
 {
     s_ms++;
+    LED_Tick();                 /* LED 闪烁节奏 (1ms), 主循环被烧录阻塞也照闪 */
 }
 
 uint32_t BSP_Millis(void)

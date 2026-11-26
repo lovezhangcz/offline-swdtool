@@ -13,4 +13,14 @@ void     BSP_DelayMs(uint32_t ms);
 void     WDT_Init(void);
 void     WDT_Feed(void);
 
+/* ---- LED 状态指示 (SysTick 中断驱动, 主循环被烧录阻塞时也持续闪烁) ----
+ * 状态码与 main.c 的 ST_* 保持一致:
+ *   0 = 无镜像      (2s 一短闪)
+ *   1 = 待命/探测中 (~2.5Hz 中闪)
+ *   2 = 烧录中      (~16Hz 快闪, 提醒操作者勿拔)
+ *   3 = 成功        (常亮)
+ *   4 = 失败        (三短闪循环)
+ *   5 = 已识别目标  (双闪, 稳定电源中, 勿拔) */
+void     LED_SetState(uint8_t state);
+
 #endif
