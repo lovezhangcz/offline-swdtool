@@ -35,10 +35,17 @@ except Exception as _e:                      # pyserial 缺失等
     messagebox.showerror("依赖缺失", "加载 boot_flash.py 失败:\n%s\n\n请先: pip install pyserial" % _e)
     raise SystemExit(1)
 
+try:                                        # 复用 online 上位机的制作窗口
+    from online_prog import MakeAesbinDialog
+except Exception:
+    MakeAesbinDialog = None
+
+import aesbin
+
 ROOT = os.path.dirname(os.path.abspath(__file__))
 LOG_DIR = os.path.join(ROOT, "logs")
 DEF_BIN_DIR = os.path.join(ROOT, "..", "testprj", "project", "obj")
-IMG_MAX = 36 * 1024                          # 镜像区可用上限
+IMG_MAX = 31 * 1024                          # 镜像区可用上限 (32KB - 1KB 头页)
 
 
 def ts():
@@ -122,7 +129,7 @@ class FlashGui:
 
         act = ttk.Frame(self.root)
         act.pack(fill="x", **pad)
-        self.btn_tgt = ttk.Button(act, text="离线烧录 (≤36KB)", command=self.on_tgt)
+        self.btn_tgt = ttk.Button(act, text="离线烧录 (烧录器内镜像)", command=self.on_tgt)
         self.btn_tgt.pack(side="left")
         self.btn_strm = ttk.Button(act, text="流式烧录 (不限大小)", command=self.on_strm)
         self.btn_strm.pack(side="left", padx=6)
@@ -134,6 +141,21 @@ class FlashGui:
         self.btn_msc.pack(side="left", padx=6)
         self.btn_app = ttk.Button(act, text="升级主板应用", command=self.on_flash_app)
         self.btn_app.pack(side="left", padx=6)
+
+        act2 = ttk.Frame(self.root)
+        act2.pack(fill="x", **pad)
+        self.btn_upload = ttk.Button(act2, text="写入烧录器 (离线镜像)",
+                                     command=self.on_upload)
+        self.btn_upload.pack(side="left")
+        self.btn_make = ttk.Button(act2, text="制作专用文件 (.aesbin)",
+                                   command=self.on_make_aesbin)
+        self.btn_make.pack(side="left", padx=6)
+        self.btn_lock = ttk.Button(act2, text="芯片上锁 (RDP L1)",
+                                   command=self.on_rdp_lock)
+        self.btn_lock.pack(side="left", padx=6)
+        self.btn_unlock = ttk.Button(act2, text="芯片解锁 (解保护+擦除)",
+                                     command=self.on_rdp_unlock)
+        self.btn_unlock.pack(side="left", padx=6)
 
         self.pb = ttk.Progressbar(self.root, mode="indeterminate")
         self.pb.pack(fill="x", padx=8, pady=(2, 0))
@@ -164,7 +186,8 @@ class FlashGui:
     def _pick_bin(self):
         p = filedialog.askopenfilename(
             title="选择固件", initialdir=os.path.abspath(DEF_BIN_DIR),
-            filetypes=[("固件 (bin/hex)", "*.bin;*.hex;*.ihx"),
+            filetypes=[("固件 (bin/hex/aesbin)", "*.bin;*.hex;*.ihx;*.aesbin"),
+                       ("AES 专用文件", "*.aesbin"),
                        ("BIN", "*.bin"), ("HEX", "*.hex"), ("所有文件", "*.*")])
         if p:
             self.var_bin.set(p)
@@ -176,19 +199,28 @@ class FlashGui:
             self.lbl_bin.config(text="(未选择有效文件)")
             return
         try:
-            addr, data = bf.load_image(p)
+            addr, data, meta = bf.load_image_ex(p)
         except Exception as e:
             self.lbl_bin.config(text="文件解析失败: %s" % e, foreground="#c62828")
             return
-        kind = "HEX->BIN" if p.lower().endswith((".hex", ".ihx")) else "BIN"
-        if len(data) <= IMG_MAX:
+        kind = {"aesbin": "AESBIN", "hex": "HEX->BIN", "bin": "BIN"}[meta["fmt"]]
+        extra = ""
+        if meta["fmt"] == "aesbin":
+            extra = "  %s" % aesbin.chip_name(meta["chip_code"])
+            fl = meta["reserved"][0] if meta["reserved"] else 0
+            if fl & aesbin.FLAG_UNLOCK:
+                extra += " 烧前解锁"
+            if fl & aesbin.FLAG_LOCK:
+                extra += " 烧后上锁"
+        payload = len(data) + len(meta["trailer"])
+        if payload <= IMG_MAX:
             self.lbl_bin.config(
-                text="%s  %d 字节  起始 0x%08X — 离线烧录/流式烧录均可"
-                     % (kind, len(data), addr), foreground="#2e7d32")
+                text="%s  %d 字节%s  起始 0x%08X — 离线烧录/流式烧录均可"
+                     % (kind, len(data), extra, addr), foreground="#2e7d32")
         else:
             self.lbl_bin.config(
-                text="%s  %d 字节  起始 0x%08X — 超出 36KB, 只能用流式烧录"
-                     % (kind, len(data), addr), foreground="#c62828")
+                text="%s  %d 字节%s  起始 0x%08X — 超出 31KB, 只能用流式烧录"
+                     % (kind, len(data), extra, addr), foreground="#c62828")
 
     # ------------------------------------------------------------ 日志 ----
     def log(self, s):
@@ -230,7 +262,8 @@ class FlashGui:
         st = "normal" if on else "disabled"
         for b in (self.btn_refresh, self.btn_conn, self.btn_probe, self.btn_dlog,
                   self.btn_tgt, self.btn_strm, self.btn_erase, self.btn_imgclr,
-                  self.btn_msc, self.btn_app):
+                  self.btn_msc, self.btn_app, self.btn_upload, self.btn_make,
+                  self.btn_lock, self.btn_unlock):
             b.config(state=st)
 
     def _task_finished(self, rc):
@@ -368,14 +401,23 @@ class FlashGui:
         self.run_task("读取设备日志", job)
 
     def on_tgt(self):
+        """用烧录器内已保存的镜像烧录 (不再下载文件)"""
+        def job():
+            return bf.do_burn(self._need_dev())
+        self.run_task("离线烧录 (烧录器内镜像)", job)
+
+    def on_upload(self):
+        """只把镜像写入烧录器 (离线模式用), 不触发烧录"""
         def job():
             dev = self._need_dev()
             p = self._need_bin()
-            _, data = bf.load_image(p)
-            if len(data) > IMG_MAX:
-                raise RuntimeError("固件 %d 字节超过 36KB, 请使用流式烧录" % len(data))
-            return bf.do_tgt(dev, p)
-        self.run_task("离线烧录 (tgt)", job)
+            _, data, meta = bf.load_image_ex(p)
+            payload = len(data) + len(meta["trailer"])
+            if payload > IMG_MAX:
+                raise RuntimeError("固件 %d 字节(含尾部)超过 31KB, 本机镜像区放不下"
+                                   % payload)
+            return bf.do_upload(dev, p)
+        self.run_task("写入烧录器", job)
 
     def on_strm(self):
         def job():
@@ -414,6 +456,54 @@ class FlashGui:
             dev = self._need_dev()
             return bf.do_flash(dev, self._need_bin())
         self.run_task("升级主板应用", job)
+
+    def on_make_aesbin(self):
+        if MakeAesbinDialog is None:
+            messagebox.showerror("不可用", "无法加载制作窗口 (online_prog.py)")
+            return
+        MakeAesbinDialog(self.root, on_upgrade=self._upgrade_from_maker)
+
+    def _upgrade_from_maker(self, path):
+        self.run_task("升级主板应用",
+                      lambda: bf.do_flash(self._need_dev(), path))
+
+    def on_rdp_lock(self):
+        if not messagebox.askyesno(
+                "确认上锁",
+                "将给目标芯片写入读保护 RDP Level 1。\n"
+                "上锁后调试器无法再读取芯片, 重新烧录前需要先解锁。\n\n继续?"):
+            return
+
+        def job():
+            dev = self._need_dev()
+            app = bf.try_app(dev, 2.0)
+            if app is None:
+                raise RuntimeError("设备无应答")
+            try:
+                st = app.rdp_set(True)
+            finally:
+                app.close()
+            if st == 16:
+                print("已写入上锁值, 请给目标断电重启后生效")
+                return 0
+            if st != 0:
+                raise RuntimeError("上锁失败: code=%d (%s)"
+                                   % (st, bf.TP_NAMES.get(st, "?")))
+            print("已上锁 RDP Level 1")
+            return 0
+        self.run_task("芯片上锁", job)
+
+    def on_rdp_unlock(self):
+        """与 online 上位机 [擦除芯片] 同一动作: 自动解锁 + 整片擦除"""
+        if not messagebox.askyesno(
+                "确认解锁",
+                "将解除目标读保护并整片擦除芯片 (选项字节改写)。\n"
+                "原有程序会全部丢失, 不可恢复。\n\n继续?"):
+            return
+
+        def job():
+            return bf.do_erase(self._need_dev())
+        self.run_task("芯片解锁 (解保护+擦除)", job)
 
 
 def main():

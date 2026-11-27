@@ -54,8 +54,9 @@
 #define FPEC_SR_BSY    (1u << 0)
 #define FPEC_OBR_RDPRT (1u << 1)
 #define OBP_RDP        0x1FFFF800u
-#define RDP_UNLOCK_KEY 0x5AA5u    /* 无保护 (值0xA5 + 补码0x5A) */
-#define RDP_LOCK_VAL   0x0000u    /* RDP Level 1 (任何 != 0xA5 的低字节值) */
+#define RDP_UNLOCK_KEY 0x5AA5u    /* 无保护: F1/GD32/APM32 的 RDP=0xA5 + 补码0x5A */
+#define RDP_UNLOCK_KEY_F0 0x55AAu /* 无保护: STM32F0 的 RDP=0xAA + 补码0x55 */
+#define RDP_LOCK_VAL   0x0000u    /* RDP Level 1 (任何 != 0xA5/0xAA 的低字节值) */
 
 /* 镜像 trailer 携带的保护配置位 (与上位机 aesbin.FLAG_* 对应) */
 #define IMG_FLAG_UNLOCK 0x01u   /* 烧录前自动解除读保护 (整片擦除) */
@@ -284,14 +285,15 @@ static uint8_t rdp_write(uint16_t val)
 }
 
 /* 解除读保护 (Level1->0): 擦除 option + 写无保护键, 硬件整片擦除, 复位后生效。
+   key 为 RDP 值+补码的 16 位半字, 各系列 Level0 取值不同 (F1=0xA5, F0=0xAA)。
    返回前已复位目标并延时, 之后可重新 target_attach 烧录。 */
-static uint8_t rdp_unlock(void)
+static uint8_t rdp_unlock(uint16_t key)
 {
     uint8_t r;
     fpec_unlock();
     r = rdp_option_erase();
     if (r != TP_OK) return r;
-    r = rdp_write(RDP_UNLOCK_KEY);
+    r = rdp_write(key);
     if (r != TP_OK) return r;
     (void)SWD_Mem_Write32(AIRCR, 0x05FA0004u);   /* SYSRESETREQ: RDP0 生效 + 整片擦除 */
     BSP_DelayMs(100);
@@ -511,13 +513,29 @@ static uint8_t tp_run_impl(uint32_t *err_addr)
        通过 FPEC 擦除 option byte 解除 (整片擦除), 复位后再走正常烧录流程 */
     if (img_flags & IMG_FLAG_UNLOCK) {
         uint32_t dp = 0;
+        uint8_t is_f0 = 0;
+        uint8_t unlocked = 0;
         if (SWD_Connect(&dp) == SWD_OK) {
             if (rdp_is_protected()) {
+                /* Cortex-M0/M0+ (STM32F0): Level0 键是 0xAA; F1/GD32/APM32 是 0xA5。
+                   按 DPIDR 区分, 避免把 F0 的 "解锁" 写成重新上锁。 */
+                uint16_t key = RDP_UNLOCK_KEY;
+                if ((dp & 0xFFFF0000u) == 0x0BB10000u ||   /* M0  */
+                    (dp & 0xFFF00000u) == 0x0BC00000u) {   /* M0+ */
+                    key = RDP_UNLOCK_KEY_F0;
+                    is_f0 = 1;
+                }
                 Log_Str("RDP unlock...\n");
-                (void)rdp_unlock();
+                unlocked = (rdp_unlock(key) == TP_OK);
             }
         }
         SWD_GPIO_Release();
+        /* F0 的选项字节只在 POR 时加载: 软复位不行, 必须让目标断电重上电,
+           否则后面的 ProgramPage 必然报写入失败。这里直接给出明确错误。 */
+        if (is_f0 && unlocked) {
+            Log_Str("RDP unlocked (need target POR)\n");
+            return TP_ERR_UNLOCK_REBOOT;
+        }
     }
 
     /* ---- 0. 先复位一次, 让目标处于"刚复位"状态 ----
@@ -966,6 +984,30 @@ uint8_t TargetEraseChip(void)
     g_target_flash_kb = 0;
     g_status.swd_err = 0;
 
+    /* 擦除前先解除读保护 (F0/F1 的 Level0 键不同), 保护状态下擦不掉 */
+    {
+        uint32_t dp = 0;
+        if (SWD_Connect(&dp) == SWD_OK && rdp_is_protected()) {
+            uint16_t key = RDP_UNLOCK_KEY;
+            uint8_t  is_f0 = 0;
+            if ((dp & 0xFFFF0000u) == 0x0BB10000u ||
+                (dp & 0xFFF00000u) == 0x0BC00000u) {
+                key = RDP_UNLOCK_KEY_F0;
+                is_f0 = 1;
+            }
+            Log_Str("RDP unlock...\n");
+            r = rdp_unlock(key);
+            if (r != TP_OK) { SWD_GPIO_Release(); return r; }
+            if (is_f0) {
+                /* F0 选项字节只在 POR 时加载: 断电重上电会自动整片擦除 */
+                SWD_GPIO_Release();
+                Log_Str("RDP unlocked (need target POR)\n");
+                return TP_ERR_UNLOCK_REBOOT;
+            }
+        }
+        SWD_GPIO_Release();
+    }
+
     r = target_attach();
     if (r != TP_OK) { Log_Str("EA attach fail\n"); SWD_GPIO_Release(); return r; }
     algo = ACTIVE_ALGO;                 /* AUTO: 识别后取对应算法 */
@@ -1010,6 +1052,15 @@ uint8_t TargetEraseChip(void)
     (void)algo_call(algo, algo->uninit, 1, 0, 0,
                     algo->prog_timeout_ms + 500u, TP_OK);
 
+    /* 整片擦除后先复位再回读: F0 擦除结束时 Flash 控制器仍忙, 立刻读会
+       拿到无效数据(实测 0xBA45C03F), 复位并重新连上后回读才可靠 */
+    (void)SWD_Mem_Write32(DHCSR, 0xA05F0000u);
+    (void)SWD_Mem_Write32(AIRCR, 0x05FA0004u);
+    BSP_DelayMs(100);
+    SWD_GPIO_Release();
+    BSP_DelayMs(20);
+    (void)target_attach();
+
     /* 空白校验: 首字与末字都应是 0xFFFFFFFF */
     if (r == TP_OK) {
         uint32_t w0 = 0, w1 = 0;
@@ -1029,6 +1080,89 @@ uint8_t TargetEraseChip(void)
     }
 
     strm_reset_run();
+    return r;
+}
+
+/* ---------------- 手动上锁 / 解锁读保护 ---------------- */
+uint8_t TargetProg_RdpSet(uint8_t do_lock)
+{
+    uint32_t dp = 0, opt = 0xFFFFFFFFu;
+    uint8_t  is_f0 = 0, was_prot;
+    uint8_t  r;
+    uint16_t ukey;
+    uint8_t  opt_low, uval;
+
+    g_status.swd_err = 0;
+    if (SWD_Connect(&dp) != SWD_OK) { SWD_GPIO_Release(); return TP_ERR_CONNECT; }
+    if ((dp & 0xFFFF0000u) == 0x0BB10000u ||      /* Cortex-M0  */
+        (dp & 0xFFF00000u) == 0x0BC00000u)        /* Cortex-M0+ */
+        is_f0 = 1;
+    ukey = is_f0 ? RDP_UNLOCK_KEY_F0 : RDP_UNLOCK_KEY;
+    uval = (uint8_t)(ukey & 0xFFu);
+
+    /* 选项字节原值: F0 写下去后要等 POR 才加载, OBR 可能还是旧值,
+       所以用 0x1FFFF800 的实际内容判断"是否已按要求设置" */
+    (void)SWD_Mem_Read32(0x1FFFF800u, &opt);
+    opt_low = (uint8_t)(opt & 0xFFu);
+    was_prot = rdp_is_protected();
+
+    if (do_lock) {
+        if (opt_low == 0x00u) {
+            if (was_prot) {
+                Log_Str("RDP already locked\n");
+                r = TP_OK;
+            } else {
+                /* 已写入上锁值: F0 需 POR 才真正生效 */
+                Log_Str("RDP locked (need target POR)\n");
+                r = is_f0 ? TP_ERR_RDP_REBOOT : TP_OK;
+            }
+        } else {
+            Log_Str("RDP lock...\n");
+            r = rdp_lock();
+            if (r != TP_OK) {
+                SWD_GPIO_Release();
+                /* F0 上电前选项字节被锁住, 写不进去: 提示断电重启 */
+                if (is_f0) {
+                    Log_Str("RDP option write failed (need target POR)\n");
+                    return TP_ERR_RDP_REBOOT;
+                }
+                return r;
+            }
+            Log_Str("RDP locked\n");
+            r = is_f0 ? TP_ERR_RDP_REBOOT : TP_OK;
+        }
+    } else {
+        if (was_prot || opt_low != uval) {
+            Log_Str("RDP unlock...\n");
+            r = rdp_unlock(ukey);
+            if (r != TP_OK) {
+                SWD_GPIO_Release();
+                /* F0 上锁值已写入但还没断电: 选项字节暂时改不了, 需 POR */
+                if (is_f0) {
+                    Log_Str("RDP pending change (need target POR)\n");
+                    return TP_ERR_RDP_REBOOT;
+                }
+                return r;
+            }
+            if (is_f0 && was_prot) {
+                /* F0 选项字节只在 POR 加载: 需断电重上电 */
+                SWD_GPIO_Release();
+                Log_Str("RDP unlocked (need target POR)\n");
+                return TP_ERR_UNLOCK_REBOOT;
+            }
+            Log_Str("RDP unlocked\n");
+            r = TP_OK;
+        } else {
+            Log_Str("RDP already unlocked\n");
+            r = TP_OK;
+        }
+    }
+
+    /* 复位目标, 让设置尽快生效 (F0 仍需 POR) */
+    (void)SWD_Mem_Write32(DHCSR, 0xA05F0000u);
+    (void)SWD_Mem_Write32(AIRCR, 0x05FA0004u);
+    BSP_DelayMs(100);
+    SWD_GPIO_Release();
     return r;
 }
 #endif

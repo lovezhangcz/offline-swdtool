@@ -27,7 +27,7 @@ target:
     app_msc : 复合设备, 同时出 U 盘 + 调试串口 (0483:5742), 两路都能用
     app_cdc_256k : 同上 CDC, 给大容量主板用 (应用 0x08002000, 镜像区 112KB)
     app_msc_256k : 同上复合设备, 给大容量主板用 (应用 0x08002000, 镜像区 112KB)
-    boot : 唯一的 boot (boot 6KB + 标志区 2KB + 应用 20KB), 两种容量通用
+    boot : 唯一的 boot (boot 6KB + 标志区 2KB + 应用 22KB), 两种容量通用
 
 协议:
     boot  : ASCII 行命令 INFO / ERASE len / W addr len crc16 + 裸数据 / F len crc32 / RUN
@@ -56,7 +56,7 @@ PID_MSC = 0x5741        # 单功能 MSC (无串口, 不会出现在 COM 列表)
 PID_COMP = 0x5742       # 复合设备 MSC+CDC (APP_MSC 调试版)
 SERIAL_PIDS = (PID_CDC, PID_COMP)
 APP_BASE = 0x08002000
-APP_SIZE = 20 * 1024        # APP 区 20KB (所有容量统一: boot 6KB + 标志区 2KB 之后)
+APP_SIZE = 22 * 1024        # APP 区 22KB (所有容量统一: boot 6KB + 标志区 2KB 之后)
 APP_BASES = (APP_BASE,)
 
 # 应用固件版本信息 (与 board.h 一致): 位于应用镜像/设备 Flash 固定偏移 0x100 处
@@ -85,6 +85,8 @@ CMD_STRM_DATA = 0x31
 CMD_STRM_END = 0x32
 CMD_TGT_ERASE = 0x33
 CMD_TGT_READ = 0x34
+CMD_TGT_RDP_LOCK = 0x36
+CMD_TGT_RDP_UNLOCK = 0x37
 
 TGT_LOAD_ADDR = 0x08000000       # 目标芯片烧录起始地址
 TGT_CHUNK = 508                  # IMG_DATA 单包最大数据量
@@ -99,7 +101,9 @@ TP_NAMES = {0: "OK", 1: "SWD连接失败", 2: "目标ID不符", 3: "停机失败
             4: "FPEC解锁失败", 5: "读/写保护", 6: "擦除失败", 7: "写入失败",
             8: "CRC校验不一致", 9: "无镜像", 10: "烧录算法失败",
             11: "超出目标Flash容量", 12: "参数错误",
-            13: "镜像是HEX文本(不是bin)"}
+            13: "镜像是HEX文本(不是bin)",
+            14: "已解除读保护, 请给目标断电重启后再烧",
+            16: "读保护设置已写入, 请给目标断电重启后生效"}
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PROJ = os.path.join(ROOT, "..", "app_offline_prog", "project")
@@ -346,6 +350,15 @@ class AppLink:
         if st != 0 or len(pl) < 5:
             raise RuntimeError("TGT_ERASE 失败 status=%d" % st)
         return dict(status=pl[0], flash_kb=struct.unpack("<I", pl[1:5])[0])
+
+    def rdp_set(self, do_lock, timeout=30.0):
+        """目标读保护设置: do_lock=True 上锁, False 解锁。返回 TP_xxx 状态码。
+        F0 解锁会返回 14 (已解锁, 需目标断电重启)。"""
+        cmd = CMD_TGT_RDP_LOCK if do_lock else CMD_TGT_RDP_UNLOCK
+        st, pl = self.cmd(cmd, timeout=timeout)
+        if st != 0 or not pl:
+            raise RuntimeError("RDP 命令失败 status=%d" % st)
+        return pl[0]
 
     def tgt_read(self, addr, length, timeout=8.0):
         """诊断: 直接读目标存储器 (每次 <=48 字节, 内部循环), 返回 bytes"""
@@ -859,6 +872,75 @@ def load_image_ex(path):
     return load, data, dict(fmt=fmt, chip_code=None, trailer=b"", reserved=b"")
 
 
+def burn_stored(app, tag="burn", total=None):
+    """用烧录器内已保存的镜像烧录一次并等待结果 (调用方负责打开/关闭 app)"""
+    # 镜像生效后设备会自动探测并烧录; 这里等一小会儿避免重复触发
+    time.sleep(0.15)
+    try:
+        st = app.status()
+    except Exception:
+        st = None
+    if st is None or st["state"] not in (ST_PROGRAMMING, ST_DONE_WAIT, ST_FAIL_WAIT):
+        print("[%s] 触发烧录 ..." % tag)
+        app.prog_now()
+
+    # 烧录在主循环里同步执行, 期间不响应命令: 用长超时轮询
+    last = None
+    end = time.time() + 90.0
+    while time.time() < end:
+        try:
+            last = app.status(timeout=30.0)
+        except Exception:
+            time.sleep(0.3)
+            continue
+        if last["state"] in (ST_DONE_WAIT, ST_FAIL_WAIT):
+            break
+        if total:
+            print("\r[%s] %s progress=%d/%d   "
+                  % (tag, ST_NAMES.get(last["state"], "?"), last["progress"], total), end="")
+        time.sleep(0.2)
+    print()
+
+    if last is None:
+        raise RuntimeError("等待烧录结果超时")
+
+    err = last["err"]
+    code = err & 0xFF
+    err_addr = err & 0xFFFFFF00
+    ok = (last["state"] == ST_DONE_WAIT and last["result"] == 1)
+    print("[%s] DPIDR=0x%08X IDCODE=0x%08X progress=%d"
+          % (tag, last["dpidr"], last["idcode"], last["progress"]))
+    if ok:
+        print("[%s] 烧录成功, 目标已复位运行 (SYSRESETREQ)" % tag)
+    else:
+        print("[%s] 烧录失败: code=%d(%s) addr=0x%08X swd_err=%d"
+              % (tag, code, TP_NAMES.get(code, "?"), err_addr, last["swd_err"]))
+
+    logs = app.logs()
+    if logs:
+        print("[app] 日志:")
+        for ln in logs.splitlines():
+            print("   ", ln)
+    return 0 if ok else 4
+
+
+def do_burn(dev):
+    """只用烧录器内已保存的镜像烧录一次, 不下载文件"""
+    app = try_app(dev, 1.5)
+    if app is None:
+        print("设备不在应用模式, 先执行: python boot_flash.py run")
+        return 3
+    try:
+        i = app.info()
+        if not i["valid"]:
+            raise RuntimeError("烧录器内没有镜像: 请先点 [写入烧录器] 把固件传进去")
+        print("[burn] 已保存镜像: %d 字节 CRC32=%08X -> 0x%08X"
+              % (i["length"], i["crc32"], i["load"]))
+        return burn_stored(app, "burn", i["length"])
+    finally:
+        app.close()
+
+
 def do_tgt(dev, bin_path):
     """把固件 (bin/hex/aesbin) 上传到本机镜像区, 再经 SWD 烧进目标并复位运行
     aesbin 会在内存里解密; 文件尾部携带的芯片代码等信息一起存入烧录器,
@@ -909,55 +991,56 @@ def do_tgt(dev, bin_path):
     app.img_end()
     print("[tgt] 镜像生效 (CRC32 已由设备校验)")
 
-    # 镜像生效后设备会自动探测并烧录; 这里等一小会儿避免重复触发
-    time.sleep(0.15)
     try:
-        st = app.status()
-    except Exception:
-        st = None
-    if st is None or st["state"] not in (ST_PROGRAMMING, ST_DONE_WAIT, ST_FAIL_WAIT):
-        print("[tgt] 手动触发烧录 ...")
-        app.prog_now()
-
-    # 烧录在主循环里同步执行, 期间不响应命令: 用长超时轮询
-    last = None
-    end = time.time() + 90.0
-    while time.time() < end:
-        try:
-            last = app.status(timeout=30.0)
-        except Exception:
-            time.sleep(0.3)
-            continue
-        if last["state"] in (ST_DONE_WAIT, ST_FAIL_WAIT):
-            break
-        print("\r[tgt] %s progress=%d/%d   "
-              % (ST_NAMES.get(last["state"], "?"), last["progress"], len(data)), end="")
-        time.sleep(0.2)
-    print()
-
-    if last is None:
+        return burn_stored(app, "tgt", len(data))
+    finally:
         app.close()
-        raise RuntimeError("等待烧录结果超时")
 
-    err = last["err"]
-    code = err & 0xFF
-    err_addr = err & 0xFFFFFF00
-    ok = (last["state"] == ST_DONE_WAIT and last["result"] == 1)
-    print("[tgt] DPIDR=0x%08X IDCODE=0x%08X progress=%d"
-          % (last["dpidr"], last["idcode"], last["progress"]))
-    if ok:
-        print("[tgt] 烧录成功, 目标已复位运行 (SYSRESETREQ)")
-    else:
-        print("[tgt] 烧录失败: code=%d(%s) addr=0x%08X swd_err=%d"
-              % (code, TP_NAMES.get(code, "?"), err_addr, last["swd_err"]))
 
-    logs = app.logs()
-    if logs:
-        print("[app] 日志:")
-        for ln in logs.splitlines():
-            print("   ", ln)
-    app.close()
-    return 0 if ok else 4
+def do_upload(dev, bin_path):
+    """只把固件 (bin/hex/aesbin) 写入烧录器镜像区, 不触发烧录
+    aesbin 在内存里解密; 尾部携带的芯片代码/保护配置一起存入烧录器"""
+    load_addr, data, meta = load_image_ex(bin_path)
+    trailer = meta["trailer"]
+    payload = data + trailer
+    if len(data) == 0:
+        raise RuntimeError("固件为空: %s" % bin_path)
+    if (load_addr & 0xFF000000) != 0x08000000:
+        raise RuntimeError("固件起始地址 0x%08X 不在 0x08xxxxxx" % load_addr)
+    crc = zlib.crc32(data) & 0xFFFFFFFF
+
+    app = try_app(dev, 1.5)
+    if app is None:
+        print("设备不在应用模式, 先执行: python boot_flash.py run")
+        return 3
+    try:
+        cap = app.info().get("capacity", 0)
+        if cap and len(payload) > cap:
+            raise RuntimeError("固件 %d 字节(含尾部 %d 字节)超出本机镜像区可用空间 (%d 字节), "
+                               "更大请用命令行 strm 流式烧录"
+                               % (len(payload), len(trailer), cap))
+        tag = ""
+        if meta["chip_code"] is not None:
+            tag = "  芯片代码=%s" % aesbin.chip_name(meta["chip_code"])
+        print("[upload] %s: %d 字节 CRC32=%08X -> 0x%08X%s"
+              % (os.path.basename(bin_path), len(data), crc, load_addr, tag))
+        fw_name = os.path.splitext(os.path.basename(bin_path))[0] + ".bin"
+        fw_name = fw_name.encode("ascii", "replace").replace(b"?", b"_")
+        t0 = time.time()
+        app.img_begin(len(payload), crc, load_addr, fw_name, len(trailer))
+        off = 0
+        while off < len(payload):
+            chunk = payload[off:off + TGT_CHUNK]
+            got = app.img_data(off, chunk)
+            off += len(chunk)
+            if got != off:
+                raise RuntimeError("设备已接收 %d != 期望 %d" % (got, off))
+        app.img_end()
+        print("[upload] 完成: %d 字节 CRC32=%08X 用时 %.1fs, 镜像已生效 "
+              "(目标插入时自动烧录)" % (len(data), crc, time.time() - t0))
+        return 0
+    finally:
+        app.close()
 
 
 def do_erase(dev):

@@ -40,6 +40,8 @@
 #define CMD_TGT_ERASE   0x33u
 #define CMD_TGT_READ    0x34u
 #define CMD_TGT_DETECT  0x35u
+#define CMD_TGT_RDP_LOCK   0x36u   /* 目标上锁 RDP Level1 */
+#define CMD_TGT_RDP_UNLOCK 0x37u   /* 目标解除读保护 (F0 需断电重启) */
 
 #define RSP_OK          0x00u
 #define RSP_ERR_ARG     0x01u
@@ -704,7 +706,37 @@ static void cmd_exec(uint8_t cmd, const uint8_t *pl, uint16_t len)
         proto_respond(cmd, RSP_OK, p, 21);
         break;
     }
+    }
+
 #endif
+
+    case CMD_TGT_RDP_LOCK:
+    case CMD_TGT_RDP_UNLOCK: {
+        uint8_t sr, prev;
+        if (g_status.state == 2u) {
+            proto_respond(cmd, RSP_ERR_STATE, 0, 0);
+            break;
+        }
+        prev = g_status.state;
+        g_status.state = 2u;
+        g_status.progress = 0;
+        sr = TargetProg_RdpSet(cmd == CMD_TGT_RDP_LOCK);
+        g_status.last_error = sr;
+        g_status.state = prev;          /* 不改变待命/结果状态 */
+        if (sr == TP_OK) {
+            Log_Str("RDP SET OK\n");
+        } else if (sr == TP_ERR_UNLOCK_REBOOT) {
+            Log_Str("RDP UNLOCKED (need POR)\n");
+        } else {
+            Log_Str(cmd == CMD_TGT_RDP_LOCK ? "RDP LOCK ERR code="
+                                            : "RDP UNLOCK ERR code=");
+            Log_Dec(sr);
+            Log_Str("\n");
+        }
+        p[0] = sr;
+        proto_respond(cmd, RSP_OK, p, 1);
+        break;
+    }
 
     default:
         proto_respond(cmd, RSP_ERR_ARG, 0, 0);

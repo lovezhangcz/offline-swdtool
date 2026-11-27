@@ -25,6 +25,9 @@
      累计次数由烧录器保存在 Flash 流水区, 掉线重连也不会丢。
   5. 成功: 绿灯 + 提示音; 失败: 红灯 + 低音。烧录中途掉线不算失败,
      自动重连后继续。
+  6. 设备停在 Boot 模式 (应用区被擦/应用损坏): 界面显示 Boot 模式并
+     启用 [写入应用固件], 选应用 .bin/.hex 即可经 boot 的 ASCII 协议
+     恢复, 不用另开命令行工具; 应用有效时则自动发 RUN 让它跑起来。
 
 运行: 双击 online_prog.py 或  python online_prog.py
 依赖: Python3 + pyserial + tkinter(自带), 复用同目录 boot_flash.py 的协议实现
@@ -63,14 +66,16 @@ ST_DONE = bf.ST_DONE_WAIT
 ST_FAILW = bf.ST_FAIL_WAIT
 
 # 状态 -> LED颜色
-S_NO_DEV, S_READY, S_PROG, S_OK, S_FAIL = range(5)
+S_NO_DEV, S_READY, S_PROG, S_OK, S_FAIL, S_BOOT = range(6)
 LED = {S_NO_DEV: "#808080", S_READY: "#18a0c8",
-       S_PROG: "#e6b800", S_OK: "#28c840", S_FAIL: "#e03030"}
+       S_PROG: "#e6b800", S_OK: "#28c840", S_FAIL: "#e03030",
+       S_BOOT: "#a06000"}
 STATE_TXT = {S_NO_DEV: "设备未连接 (自动重连中…)",
              S_READY:  "就绪 - 点击 [烧 录] 开始",
              S_PROG:   "烧录中, 请勿拔线!",
              S_OK:     "烧录成功 ✓",
-             S_FAIL:   "烧录失败 ✗"}
+             S_FAIL:   "烧录失败 ✗",
+             S_BOOT:   "Boot 模式 — 缺少应用, 点击 [写入应用固件] 恢复"}
 
 
 def _wav_bytes(segments, rate=16000, vol=0.4):
@@ -129,8 +134,10 @@ class Worker(threading.Thread):
         self.fw = None                # dict: load/data/crc/name/trailer
         self.burn_req = False
         self.upload_req = False       # 把镜像写入烧录器 (离线模式用)
+        self.erase_req = False        # 整片擦除目标芯片 (含解除读保护)
         self.upgrade_req = None       # 待执行的"升级烧录器"固件路径
         self.port = None              # 当前设备串口
+        self.boot_mode = False        # 设备停在 boot (无应用)
         self.stream_mode = False      # 启用流水烧录
         self.clear_req = False        # 需要清除一次烧录器镜像
         self.last_seq = None          # 设备侧烧录尝试序号 (发现新结果用)
@@ -153,6 +160,16 @@ class Worker(threading.Thread):
     def request_upload(self):
         with self.lock:
             self.upload_req = True
+
+    def request_erase(self):
+        with self.lock:
+            self.erase_req = True
+
+    def take_erase(self):
+        with self.lock:
+            r = self.erase_req
+            self.erase_req = False
+            return r
 
     def request_upgrade(self, path):
         with self.lock:
@@ -209,6 +226,23 @@ class Worker(threading.Thread):
             return app.ping(1.0)
         except Exception:
             return False
+
+    @staticmethod
+    def probe_boot(dev):
+        """设备停在 boot 时返回 (BootLink, INFO 行), 否则 (None, None)。
+        boot 用 ASCII 行命令 (INFO/ERASE/W/F/RUN), 应用用二进制帧,
+        两者互相不应答, 所以只能分别探测。"""
+        try:
+            ser = bf.open_port(dev)
+        except Exception:
+            return None, None
+        bl = bf.BootLink(dev, ser)
+        try:
+            info = bl.info()
+            return bl, info
+        except Exception:
+            bl.close()
+            return None, None
 
     # ---- 目标探测: 读 IDCODE 当握手, 返回 idcode 或 None ----
     def detect(self, app):
@@ -363,6 +397,32 @@ class Worker(threading.Thread):
                               % (len(img), len(trailer), time.time() - t0))
         self.set_state(S_READY)
 
+    def run_erase(self, app):
+        """整片擦除目标芯片; 芯片处于读保护时先自动解除保护"""
+        self.set_state(S_PROG)
+        self.emit("log", text="开始整片擦除目标芯片 (含解除读保护)...")
+        try:
+            r = app.tgt_erase(timeout=60.0)
+        except Exception as e:
+            self.emit("log", text="擦除失败: %s" % e)
+            self.set_state(S_FAIL)
+            return
+        st = r["status"]
+        if st == 0:
+            if r.get("flash_kb"):
+                self.emit("log", text="擦除完成, 目标 Flash %dKB" % r["flash_kb"])
+            else:
+                self.emit("log", text="擦除完成 (空白校验通过)")
+            self.set_state(S_READY)
+        elif st == 14:
+            self.emit("log", text="已解除读保护, 请给目标断电重启 "
+                                  "(重新上电时会自动整片擦除)")
+            self.set_state(S_FAIL)
+        else:
+            self.emit("log", text="擦除失败: code=%d (%s)"
+                                  % (st, bf.TP_NAMES.get(st, "?")))
+            self.set_state(S_FAIL)
+
     def run_offline(self, app):
         """离线镜像烧录: 让烧录器用已装载的镜像烧一次"""
         inf = self.dev or {}
@@ -427,7 +487,49 @@ class Worker(threading.Thread):
             # ---------- 设备连接 / 自动重连 ----------
             if app is None:
                 dev = bf.find_port(verbose=False)
-                app = bf.ensure_app(dev, 3.0) if dev else None
+                app = bf.try_app(dev, 0.8) if dev else None
+                if app is None and dev:
+                    bl, info = self.probe_boot(dev)
+                    if bl is not None:
+                        # 设备停在 boot: 应用有效就先让它跑起来 (USB 掉线后
+                        # 常驻 boot 是正常现象), 没有应用则进入 Boot 模式等
+                        # 用户点 [写入应用固件] 用 boot 协议恢复。
+                        if "app=1" in info:
+                            bl.ser.write(b"RUN\n")
+                            bl.read_line(1.0)
+                            bl.close()
+                            time.sleep(0.4)
+                            continue
+                        bl.close()
+                        self.port = dev
+                        if not self.boot_mode:
+                            self.boot_mode = True
+                            self.reconn_tries = 0
+                            ver = (info.split("ver=")[1].split()[0]
+                                   if "ver=" in info else "?")
+                            self.emit("device", port=dev, version=ver, boot=True)
+                            self.emit("log", text="烧录器停在 Boot 模式 (%s)" % info)
+                            self.set_state(S_BOOT)
+                        up = self.take_upgrade()
+                        if up:
+                            try:
+                                self.run_upgrade(up)
+                            except Exception as e:
+                                self.emit("log", text="写入应用失败: %s" % e)
+                                self.set_state(S_BOOT)
+                            else:
+                                self.boot_mode = False
+                                self.emit("device", port=None, version=None)
+                                self.set_state(S_NO_DEV)
+                            self.port = None
+                            time.sleep(SETTLE_S)
+                            continue
+                        time.sleep(1.0)
+                        continue
+                    if self.boot_mode:
+                        self.boot_mode = False
+                        self.emit("device", port=None, version=None)
+                        self.set_state(S_NO_DEV)
                 if app is None:
                     self.reconn_tries += 1
                     now = time.time()
@@ -437,6 +539,7 @@ class Worker(threading.Thread):
                     time.sleep(RECONNECT_S)
                     continue
                 self.reconn_tries = 0
+                self.boot_mode = False
                 dev = app.dev
                 self.port = dev
                 try:
@@ -500,6 +603,11 @@ class Worker(threading.Thread):
                 # ---------- 轮询: 心跳 / 设备信息 / 烧录结果 ----------
                 self.poll_device(app)
 
+                # ---------- 整片擦除目标芯片 (含解除读保护) ----------
+                if self.take_erase() and self.state != S_PROG:
+                    self.run_erase(app)
+                    continue
+
                 # ---------- 写入烧录器 (离线模式用) ----------
                 if self.take_upload() and self.state != S_PROG:
                     if fw is None:
@@ -550,6 +658,7 @@ class Worker(threading.Thread):
                 self.port = None
                 presence = None
                 self.take_burn()          # 掉线时丢弃未执行的烧录请求
+                self.take_erase()         # 掉线时丢弃未执行的擦除请求
                 self.emit("device", port=None, version=None)
                 self.emit("presence", idcode=None)
                 self.emit("host", on=False)
@@ -743,6 +852,7 @@ class App(tk.Tk):
         self.ok_cnt = 0
         self.fail_cnt = 0
         self.dev_online = False
+        self.dev_boot = False         # 设备停在 boot (缺应用)
         self.burning = False
         self.dev = {}
         self.dev_burn = None          # 设备累计次数 (基线/最新)
@@ -832,6 +942,14 @@ class App(tk.Tk):
         bot.pack(fill="x", padx=8, pady=(0, 6))
         tk.Button(bot, text="制作专用文件", width=13,
                   command=self._open_maker).pack(side="right")
+        # 设备停在 boot (应用被擦/损坏) 时用它经 boot 协议写入应用固件
+        self.btn_recover = tk.Button(bot, text="写入应用固件", width=13,
+                                     command=self._recover_app, state="disabled")
+        self.btn_recover.pack(side="right", padx=(0, 6))
+        # 整片擦除目标芯片 (含解除读保护)
+        self.btn_erase = tk.Button(bot, text="擦除芯片", width=13,
+                                   command=self._erase_chip, state="disabled")
+        self.btn_erase.pack(side="right", padx=(0, 6))
 
         self._refresh_mode()
 
@@ -881,11 +999,33 @@ class App(tk.Tk):
         MakeAesbinDialog(self, self._request_upgrade)
 
     def _request_upgrade(self, path):
-        if not self.dev_online:
+        if not self.dev_online and not self.dev_boot:
             messagebox.showwarning("未连接", "烧录器未连接, 无法升级")
             return
         self._log("请求升级烧录器: %s" % os.path.basename(path))
         self.worker.request_upgrade(path)
+
+    def _recover_app(self):
+        """设备停在 boot 时, 用 boot 协议把应用固件写回去"""
+        p = filedialog.askopenfilename(
+            title="选择烧录器应用固件 (offline_prog_app_cdc.bin/.hex)",
+            filetypes=[("应用固件", "*.bin *.hex *.ihx"), ("所有文件", "*.*")])
+        if not p:
+            return
+        self._request_upgrade(p)
+
+    def _erase_chip(self):
+        """整片擦除目标芯片; 目标被读保护时会先自动解锁"""
+        if not self.dev_online:
+            messagebox.showwarning("未连接", "烧录器未连接, 无法擦除")
+            return
+        if not messagebox.askyesno(
+                "擦除芯片",
+                "将解除目标读保护并整片擦除目标芯片。\n"
+                "芯片内现有程序会全部丢失, 确定继续?"):
+            return
+        self._log("请求整片擦除目标芯片 (含解除读保护)")
+        self.worker.request_erase()
 
     def _upload(self):
         self.worker.request_upload()
@@ -922,6 +1062,10 @@ class App(tk.Tk):
             up = self.worker.fw is not None
         self.btn_burn.config(state="normal" if ok else "disabled")
         self.btn_upload.config(state="normal" if up else "disabled")
+        self.btn_recover.config(state="normal" if self.dev_boot else "disabled")
+        self.btn_erase.config(state="normal"
+                              if (self.dev_online and not self.burning)
+                              else "disabled")
 
     def _clear_cnt(self):
         self.fail_cnt = 0
@@ -969,8 +1113,18 @@ class App(tk.Tk):
                         self.lb_prog.config(text="")
                     self._update_burn_btn()
                 elif kind == "device":
-                    self.dev_online = bool(kw["port"])
-                    if kw["port"]:
+                    self.dev_boot = bool(kw.get("boot"))
+                    self.dev_online = bool(kw["port"]) and not self.dev_boot
+                    if self.dev_boot:
+                        self.lb_dev.config(
+                            text="设备: %s  Boot 模式 (缺少应用, 可点 [写入应用固件] 恢复)"
+                                 % kw["port"], fg="#a06000")
+                        self._log("烧录器停在 Boot 模式: %s (boot %s)"
+                                  % (kw["port"], kw["version"]))
+                        self.lb_host.config(text="")
+                        self.dev = {}
+                        self._update_devimg()
+                    elif kw["port"]:
                         self.lb_dev.config(text="设备: %s 已连接  固件 %s"
                                            % (kw["port"], kw["version"]),
                                            fg="#006000")

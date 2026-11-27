@@ -29,6 +29,8 @@
 #define TP_ERR_SIZE        11u   /* 超出目标 Flash 容量 */
 #define TP_ERR_PARAM       12u   /* 参数错误 */
 #define TP_ERR_HEX         13u   /* 镜像是 HEX 文本, 不是 bin */
+#define TP_ERR_UNLOCK_REBOOT 14u /* 已解除读保护, 需给目标断电重启(POR)后再烧 */
+#define TP_ERR_RDP_REBOOT 16u    /* 选项字节已设置, 需断电重启后才生效/可再改 */
 #define TP_ERR_SIZE        11u   /* 超出目标 Flash 容量 */
 #define TP_ERR_PARAM       12u   /* 参数错误 (长度/偏移) */
 
@@ -66,6 +68,13 @@ uint8_t TargetStream_End(uint32_t *err_addr);
   * @return TP_xxx, 目标 Flash 容量见 g_target_flash_kb
   */
 uint8_t TargetEraseChip(void);
+
+/**
+  * 手动设置读保护 (RDP Level 1)
+  * @param do_lock 1=上锁, 0=解锁
+  * @return TP_OK 成功; TP_ERR_UNLOCK_REBOOT 表示已解除保护, 目标需断电重启
+  */
+uint8_t TargetProg_RdpSet(uint8_t do_lock);
 
 /**
   * 执行一次完整烧录

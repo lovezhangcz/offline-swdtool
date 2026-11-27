@@ -22,10 +22,10 @@
   *   Flash 布局 (单 boot, 所有容量统一; 只有镜像区大小按容量区分):
   *     0x08000000 - 0x080017FF : boot 6KB (独立 target, 只烧一次)
   *     0x08001800 - 0x08001FFF : 升级标志区 2KB (只用前 1KB, 兼容 2KB 页)
-  *     0x08002000 - 0x08006FFF : 应用 20KB (可经 USB 由 boot 升级)
-  *     0x08007000 - 0x080077FF : 烧录流水记录区 2KB (页A流水 / 页B计数)
-  *     0x08007800 - 0x0800FFFF : 镜像区 34KB  (64KB 芯片),
-  *                               0x0801FFFF / 0x08022FFF 分别 98KB / 110KB
+  *     0x08002000 - 0x080077FF : 应用 22KB (可经 USB 由 boot 升级)
+  *     0x08007800 - 0x08007FFF : 烧录流水记录区 2KB (页A流水 / 页B计数)
+  *     0x08008000 - 0x0800FFFF : 镜像区 32KB  (64KB 芯片),
+  *                               0x0801FFFF / 0x08022FFF 分别 96KB / 108KB
   *
   *   boot / 标志区 / 应用的地址对所有容量完全一致, 两种板共用同一个 boot;
   *   容量差异只体现在应用 target 的镜像区大小 (FLASH_256K / FLASH_128K 宏)。
@@ -196,9 +196,8 @@
 /* 64KB flash 分区 (1KB/页):
  *
  *   0x08000000 - 0x080017FF : boot 6KB
- *   0x08001800 - 0x080067FF : 应用 20KB (由 boot 通过 USB 升级)
- *   0x08006800 - 0x0800FBFF : 目标固件镜像存储区 37KB
- *   0x0800FC00 - 0x0800FFFF : boot 升级标志页
+ *   0x08001800 - 0x080077FF : 应用 22KB (由 boot 通过 USB 升级)
+ *   0x08007800 - 0x0800FFFF : 目标固件镜像存储区 32KB (含 32 字节头)
  *
  * BUILD_BOOT : 编译 boot (Bootloader)
  * BUILD_APP  : 编译可被 boot 升级的应用 target (APP_CDC / APP_MSC)
@@ -214,24 +213,24 @@
      0x08000000-0x080017FF  boot 6KB
      0x08001800-0x08001FFF  升级标志区 2KB (实际只用前 1KB; 留 2KB 是为了
                              万一芯片是 2KB 页, 擦标志页不会连带擦掉应用)
-     0x08002000-0x08006FFF  应用 20KB
-     0x08007000-0x080077FF  烧录流水记录区 2KB (随离线固件更新而擦除)
-     0x08007800-........    镜像区 (按容量到芯片可用末尾) */
+     0x08002000-0x080077FF  应用 22KB
+     0x08007800-0x08007FFF  烧录流水记录区 2KB (随离线固件更新而擦除)
+     0x08008000-........    镜像区 (按容量到芯片可用末尾) */
 #define APP_BASE            0x08002000u
-#define APP_SIZE            (20u * 1024u)
+#define APP_SIZE            (22u * 1024u)
 
 #define BOOT_FLAG_ADDR      0x08001800u
 #define BOOT_FLAG_RESERVE   (2u * 1024u)      /* 标志区预留: 0x08001800-0x08001FFF */
 
-#define RECORD_BASE         0x08007000u       /* 烧录流水记录区 2KB (页A流水 + 页B计数) */
+#define RECORD_BASE         0x08007800u       /* 烧录流水记录区 2KB (页A流水 + 页B计数) */
 #define RECORD_SIZE         (2u * 1024u)
-#define IMG_STORE_ADDR      (RECORD_BASE + RECORD_SIZE)   /* 0x08007800 */
+#define IMG_STORE_ADDR      (RECORD_BASE + RECORD_SIZE)   /* 0x08008000 */
 #if defined(FLASH_256K)
-  #define IMG_STORE_SIZE    (110u * 1024u)          /* 0x08007800 - 0x08022FFF */
+  #define IMG_STORE_SIZE    (108u * 1024u)          /* 0x08008000 - 0x08022FFF */
 #elif defined(FLASH_128K)
-  #define IMG_STORE_SIZE    (98u * 1024u)           /* 0x08007800 - 0x0801FFFF */
+  #define IMG_STORE_SIZE    (96u * 1024u)           /* 0x08008000 - 0x0801FFFF */
 #else
-  #define IMG_STORE_SIZE    (34u * 1024u)           /* 0x08007800 - 0x0800FFFF */
+  #define IMG_STORE_SIZE    (32u * 1024u)           /* 0x08008000 - 0x0800FFFF */
 #endif
 /* 备份寄存器分配 (复位/看门狗复位保持; 需备份域写使能 PWR_CR_DBP) */
 #define BKP_REG_FORCE       BKP->DR1        /* 应用写 BOOT_FORCE_MAGIC 后软复位 -> boot 直接进升级模式 */
@@ -280,7 +279,7 @@ typedef struct {
 #define APP_FW_VERSION_MINOR  1
 #endif
 #ifndef APP_FW_VERSION_PATCH
-#define APP_FW_VERSION_PATCH  41
+#define APP_FW_VERSION_PATCH  48
 #endif
 
 #define APP_STR_(x)         #x

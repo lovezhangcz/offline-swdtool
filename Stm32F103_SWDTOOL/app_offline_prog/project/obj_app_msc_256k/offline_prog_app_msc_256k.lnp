@@ -12,6 +12,7 @@
 ".\obj_app_msc_256k\flash_algo_gd32f303.o"
 ".\obj_app_msc_256k\flash_algo_apm32f40x.o"
 ".\obj_app_msc_256k\flash_algo_stm32f1.o"
+".\obj_app_msc_256k\flash_algo_stm32f0.o"
 ".\obj_app_msc_256k\swd_host.o"
 ".\obj_app_msc_256k\usb_hw.o"
 ".\obj_app_msc_256k\usb_cdc.o"
@@ -23,6 +24,6 @@
 ".\obj_app_msc_256k\boot_flash.o"
 ".\obj_app_msc_256k\boot_proto.o"
 --library_type=microlib --strict --scatter ".\obj_app_msc_256k\offline_prog_app_msc_256k.sct"
---summary_stderr --info summarysizes --map --load_addr_map_info --callgraph --symbols
+--summary_stderr --info summarysizes --map --callgraph --symbols
 --info sizes
 --list ".\list_app_msc_256k\offline_prog_app_msc_256k.map" -o .\obj_app_msc_256k\offline_prog_app_msc_256k.axf
