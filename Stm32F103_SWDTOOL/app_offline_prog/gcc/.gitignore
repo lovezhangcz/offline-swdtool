@@ -1,0 +1,7 @@
+# GCC 构建产物
+build/
+backup/
+*.map
+*.elf
+*.bin
+*.hex
